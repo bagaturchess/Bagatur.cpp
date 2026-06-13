@@ -62,7 +62,7 @@ void calc_shifts() noexcept {
 std::vector<BB> enumerate_occupancy(BB mask) {
     int bits = popcount(mask);
     std::vector<BB> result;
-    result.reserve(1u << bits);
+    result.reserve(std::size_t{1} << bits);
     BB occ = 0;
     do {
         result.push_back(occ);

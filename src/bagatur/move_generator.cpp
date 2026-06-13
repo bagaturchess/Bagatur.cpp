@@ -129,7 +129,7 @@ void MoveGenerator::generateNotInCheckMoves(ChessBoard& cb) {
     BB pinned_pieces = cb.friendlyPieces[us] & cb.pinnedPieces;
     while (pinned_pieces) {
         int sq = trailing_zeros(pinned_pieces);
-        BB sq_bb = pinned_pieces & -pinned_pieces;  // = lowest_bit(pinned_pieces)
+        BB sq_bb = lowest_bit(pinned_pieces);
         BB pinned_movement = cc::PINNED_MOVEMENT[sq][cb.kingIndex[us]];
         switch (cb.pieceIndexes[sq]) {
             case PAWN:   addPawnMoves(sq_bb, cb, cb.emptySpaces & pinned_movement); break;
@@ -169,7 +169,7 @@ void MoveGenerator::generateNotInCheckAttacks(ChessBoard& cb) {
     BB pinned_pieces = cb.friendlyPieces[us] & cb.pinnedPieces;
     while (pinned_pieces) {
         int sq = trailing_zeros(pinned_pieces);
-        BB sq_bb = pinned_pieces & -pinned_pieces;
+        BB sq_bb = lowest_bit(pinned_pieces);
         BB ray = enemies & cc::PINNED_MOVEMENT[sq][cb.kingIndex[us]];
         switch (cb.pieceIndexes[sq]) {
             case PAWN:   addPawnAttacksAndPromotions(sq_bb, cb, ray, 0); break;
@@ -226,7 +226,7 @@ void MoveGenerator::addPawnAttacksAndPromotions(BB pawns, ChessBoard& cb, BB ene
         piece = pawns & bb::RANK_7;
         while (piece) {
             int from = trailing_zeros(piece);
-            BB lsb = piece & -piece;
+            BB lsb = lowest_bit(piece);
             if (((lsb << 8) & emptySpaces) != 0) addPromotionMove(from, from + 8);
             addPromotionAttacks(static_moves::PAWN_ATTACKS[WHITE][from] & enemies, from, cb.pieceIndexes);
             piece &= piece - 1;
@@ -246,7 +246,7 @@ void MoveGenerator::addPawnAttacksAndPromotions(BB pawns, ChessBoard& cb, BB ene
         piece = pawns & bb::RANK_2;
         while (piece) {
             int from = trailing_zeros(piece);
-            BB lsb = piece & -piece;
+            BB lsb = lowest_bit(piece);
             if (((lsb >> 8) & emptySpaces) != 0) addPromotionMove(from, from - 8);
             addPromotionAttacks(static_moves::PAWN_ATTACKS[BLACK][from] & enemies, from, cb.pieceIndexes);
             piece &= piece - 1;
@@ -266,7 +266,7 @@ void MoveGenerator::addPawnMoves(BB pawns, ChessBoard& cb, BB possible) {
         // 2-step pushes
         piece = pawns & (possible >> 16) & bb::RANK_2;
         while (piece) {
-            BB lsb = piece & -piece;
+            BB lsb = lowest_bit(piece);
             if ((cb.emptySpaces & (lsb << 8)) != 0)
                 addMove(mv::create_white_pawn_2_move(trailing_zeros(piece)));
             piece &= piece - 1;
@@ -279,7 +279,7 @@ void MoveGenerator::addPawnMoves(BB pawns, ChessBoard& cb, BB possible) {
         }
         piece = pawns & (possible << 16) & bb::RANK_7;
         while (piece) {
-            BB lsb = piece & -piece;
+            BB lsb = lowest_bit(piece);
             if ((cb.emptySpaces & (lsb >> 8)) != 0)
                 addMove(mv::create_black_pawn_2_move(trailing_zeros(piece)));
             piece &= piece - 1;
