@@ -8,7 +8,7 @@
 
 #include "types.h"
 
-namespace bagatur::magic {
+namespace board::magic {
 
 void init();
 
@@ -50,4 +50,4 @@ BAGATUR_FORCE_INLINE BB queen_moves_empty(int from) noexcept {
     return rook_magic_moves[from][0] | bishop_magic_moves[from][0];
 }
 
-}  // namespace bagatur::magic
+}  // namespace board::magic

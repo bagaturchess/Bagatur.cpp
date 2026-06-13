@@ -5,11 +5,11 @@
 #include "castling_config.h"
 #include "types.h"
 
-namespace bagatur {
+namespace board {
 class ChessBoard;
 }
 
-namespace bagatur::castling {
+namespace board::castling {
 
 BB   getCastlingIndexes(int colorToMove, int castlingRights, const CastlingConfig& cfg) noexcept;
 int  getRookMovedOrAttackedCastlingRights(int castlingRights, int rook_sq, const CastlingConfig& cfg) noexcept;
@@ -20,4 +20,4 @@ bool isValidCastlingMove(const ChessBoard& cb, int fromIndex, int toIndex) noexc
 struct RookFromTo { int from; int to; };
 RookFromTo getRookFromToSquareIDs(const ChessBoard& cb, int kingToIndex) noexcept;
 
-}  // namespace bagatur::castling
+}  // namespace board::castling

@@ -2,7 +2,7 @@
 
 #include "chess_constants.h"
 
-namespace bagatur {
+namespace board {
 
 void CastlingConfig::initFor(int from_king_w_, int from_rook_ks_w_, int from_rook_qs_w_,
                              int from_king_b_, int from_rook_ks_b_, int from_rook_qs_b_) {
@@ -32,4 +32,4 @@ CastlingConfig CastlingConfig::classic() {
     return c;
 }
 
-}  // namespace bagatur
+}  // namespace board

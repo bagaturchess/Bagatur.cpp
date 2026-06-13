@@ -63,7 +63,7 @@ This produces two binaries under `build/`:
 ## Layout
 
 ```
-src/bagatur/
+src/board/
   types.h               primitives + force-inline macro
   bitboard.h            named square / file / rank bitmasks
   static_moves.h        knight, king, pawn-attack tables (constexpr)

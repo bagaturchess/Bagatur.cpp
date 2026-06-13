@@ -5,7 +5,7 @@
 
 #include <vector>
 
-namespace bagatur::magic {
+namespace board::magic {
 
 std::array<BB, 64>  rook_movement_masks{};
 std::array<BB, 64>  bishop_movement_masks{};
@@ -174,4 +174,4 @@ void init() {
     build_tables();
 }
 
-}  // namespace bagatur::magic
+}  // namespace board::magic

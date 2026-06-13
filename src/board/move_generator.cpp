@@ -10,7 +10,7 @@
 #include "see_util.h"
 #include "static_moves.h"
 
-namespace bagatur {
+namespace board {
 
 MoveGenerator::MoveGenerator() { clearHistoryHeuristics(); }
 
@@ -475,4 +475,4 @@ void MoveGenerator::addPromotionAttacks(BB moves, int from, const int* pieceInde
     }
 }
 
-}  // namespace bagatur
+}  // namespace board

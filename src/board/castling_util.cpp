@@ -4,7 +4,7 @@
 #include "check_util.h"
 #include "chess_board.h"
 
-namespace bagatur::castling {
+namespace board::castling {
 
 BB getCastlingIndexes(int colorToMove, int castlingRights, const CastlingConfig& /*cfg*/) noexcept {
     if (castlingRights == 0) return 0;
@@ -113,4 +113,4 @@ RookFromTo getRookFromToSquareIDs(const ChessBoard& cb, int kingToIndex) noexcep
     return { 0, 0 };
 }
 
-}  // namespace bagatur::castling
+}  // namespace board::castling

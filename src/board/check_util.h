@@ -9,7 +9,7 @@
 #include "static_moves.h"
 #include "types.h"
 
-namespace bagatur::check {
+namespace board::check {
 
 BAGATUR_FORCE_INLINE bool is_in_check_super(int king_sq, int color,
                                             const BB enemy[7], BB all_pieces) noexcept {
@@ -42,4 +42,4 @@ BAGATUR_FORCE_INLINE bool is_in_check_including_king(int king_sq, int color,
           | (enemy[KING]                  & static_moves::KING_MOVES[king_sq])) != 0;
 }
 
-}  // namespace bagatur::check
+}  // namespace board::check

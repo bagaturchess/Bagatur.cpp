@@ -30,7 +30,7 @@
 #  define BAGATUR_FORCE_INLINE inline __attribute__((always_inline))
 #endif
 
-namespace bagatur {
+namespace board {
 
 using BB = std::uint64_t;
 using U32 = std::uint32_t;
@@ -152,4 +152,4 @@ BAGATUR_FORCE_INLINE constexpr int flip_horizontal_index(int sq) noexcept {
     return (sq & 0xF8) | (7 - (sq & 7));
 }
 
-}  // namespace bagatur
+}  // namespace board

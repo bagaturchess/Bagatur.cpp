@@ -9,7 +9,7 @@
 #include "move_util.h"
 #include "static_moves.h"
 
-namespace bagatur::see {
+namespace board::see {
 
 namespace {
 
@@ -103,4 +103,4 @@ int getSeeFieldScore(const ChessBoard& cb, int square_id) noexcept {
                         cb.pieceIndexes[square_id], allPieces, slidingMask);
 }
 
-}  // namespace bagatur::see
+}  // namespace board::see

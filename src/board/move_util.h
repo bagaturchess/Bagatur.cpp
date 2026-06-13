@@ -12,7 +12,7 @@
 
 #include "types.h"
 
-namespace bagatur::mv {
+namespace board::mv {
 
 inline constexpr int TYPE_NORMAL      = 0;
 inline constexpr int TYPE_EP          = 1;
@@ -88,4 +88,4 @@ BAGATUR_FORCE_INLINE constexpr bool is_normal(int move)    noexcept { return mov
 BAGATUR_FORCE_INLINE constexpr bool is_ep(int move)        noexcept { return move_type(move) == TYPE_EP; }
 BAGATUR_FORCE_INLINE constexpr bool is_castling(int move)  noexcept { return move_type(move) == TYPE_CASTLING; }
 
-}  // namespace bagatur::mv
+}  // namespace board::mv

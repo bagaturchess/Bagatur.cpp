@@ -4,7 +4,7 @@
 
 #include "types.h"
 
-namespace bagatur {
+namespace board {
 
 struct CastlingConfig {
     // Reference square indices (Bagatur's reversed-file layout).
@@ -45,4 +45,4 @@ struct CastlingConfig {
     static CastlingConfig classic();
 };
 
-}  // namespace bagatur
+}  // namespace board

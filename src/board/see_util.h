@@ -4,13 +4,13 @@
 
 #include "types.h"
 
-namespace bagatur {
+namespace board {
 class ChessBoard;
 }
 
-namespace bagatur::see {
+namespace board::see {
 
 int getSeeCaptureScore(const ChessBoard& cb, int move) noexcept;
 int getSeeFieldScore(const ChessBoard& cb, int square_id) noexcept;
 
-}  // namespace bagatur::see
+}  // namespace board::see

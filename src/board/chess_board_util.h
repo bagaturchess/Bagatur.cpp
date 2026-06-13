@@ -9,7 +9,7 @@
 
 #include "chess_board.h"
 
-namespace bagatur::cbu {
+namespace board::cbu {
 
 constexpr std::string_view FEN_START =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -21,4 +21,4 @@ std::unique_ptr<ChessBoard> getNewCB(std::string_view fen);
 
 std::string toString(const ChessBoard& cb, bool add_ep = true);
 
-}  // namespace bagatur::cbu
+}  // namespace board::cbu

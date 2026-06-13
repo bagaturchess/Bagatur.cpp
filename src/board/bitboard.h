@@ -7,7 +7,7 @@
 
 #include "types.h"
 
-namespace bagatur::bb {
+namespace board::bb {
 
 // --- rank 1 ---
 inline constexpr BB H1 = 1ULL;
@@ -147,4 +147,4 @@ BAGATUR_FORCE_INLINE constexpr BB black_pawn_attacks(BB pawns) noexcept {
     return ((pawns >> 9) & NOT_FILE_A) | ((pawns >> 7) & NOT_FILE_H);
 }
 
-}  // namespace bagatur::bb
+}  // namespace board::bb

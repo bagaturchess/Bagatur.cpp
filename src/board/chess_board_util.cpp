@@ -14,7 +14,7 @@
 #include "static_moves.h"
 #include "zobrist.h"
 
-namespace bagatur::cbu {
+namespace board::cbu {
 
 namespace {
 
@@ -340,4 +340,4 @@ std::string toString(const ChessBoard& cb, bool add_ep) {
     return sb;
 }
 
-}  // namespace bagatur::cbu
+}  // namespace board::cbu

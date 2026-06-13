@@ -8,11 +8,11 @@
 #include <string_view>
 #include <vector>
 
-#include "bagatur/chess_board.h"
-#include "bagatur/chess_board_util.h"
-#include "bagatur/move_generator.h"
+#include "board/chess_board.h"
+#include "board/chess_board_util.h"
+#include "board/move_generator.h"
 
-using namespace bagatur;
+using namespace board;
 
 static std::uint64_t perft(ChessBoard& cb, MoveGenerator& gen, int depth) {
     if (depth == 0) return 1;

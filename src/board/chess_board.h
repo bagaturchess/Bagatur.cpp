@@ -15,7 +15,7 @@
 #include "repetition.h"
 #include "types.h"
 
-namespace bagatur {
+namespace board {
 
 class ChessBoard {
 public:
@@ -149,4 +149,4 @@ private:
     bool isLegalNonKingMove(int move) noexcept;
 };
 
-}  // namespace bagatur
+}  // namespace board

@@ -7,7 +7,7 @@
 
 #include "types.h"
 
-namespace bagatur::zob {
+namespace board::zob {
 
 void init();
 
@@ -16,4 +16,4 @@ extern std::array<BB, 16>                              castling;
 extern std::array<BB, 48>                              epIndex;
 extern std::array<std::array<std::array<BB, 7>, 2>, 64> piece;  // [square][color][piece]
 
-}  // namespace bagatur::zob
+}  // namespace board::zob

@@ -12,7 +12,7 @@
 
 #include "types.h"
 
-namespace bagatur::eval {
+namespace board::eval {
 
 inline constexpr std::array<int, 7> PHASE = { 0, 0, 3, 3, 5, 9, 0 };
 //   index: EMPTY, PAWN, NIGHT, BISHOP, ROOK, QUEEN, KING
@@ -33,4 +33,4 @@ inline constexpr std::array<int, 7> PROMOTION_SCORE_SEE = {
 inline constexpr std::array<std::array<std::array<int, 64>, 2>, 7> PSQT_MG{};
 inline constexpr std::array<std::array<std::array<int, 64>, 2>, 7> PSQT_EG{};
 
-}  // namespace bagatur::eval
+}  // namespace board::eval

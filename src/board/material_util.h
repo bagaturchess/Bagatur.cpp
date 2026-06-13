@@ -9,7 +9,7 @@
 
 #include "types.h"
 
-namespace bagatur::material {
+namespace board::material {
 
 // VALUES[color][piece_index] -- bit-packed increment per piece.
 inline constexpr std::array<std::array<int, 6>, 2> VALUES = {{
@@ -64,4 +64,4 @@ BAGATUR_FORCE_INLINE bool is_krkp(int mat) noexcept {
     return mat == 0x10400 || mat == 0x4000001;
 }
 
-}  // namespace bagatur::material
+}  // namespace board::material

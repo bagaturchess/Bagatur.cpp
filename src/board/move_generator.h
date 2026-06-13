@@ -7,7 +7,7 @@
 #include "chess_board.h"
 #include "types.h"
 
-namespace bagatur {
+namespace board {
 
 class MoveGenerator {
 public:
@@ -89,4 +89,4 @@ private:
     void addPromotionAttacks(BB moves, int fromIndex, const int* pieceIndexes);
 };
 
-}  // namespace bagatur
+}  // namespace board

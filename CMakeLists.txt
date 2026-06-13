@@ -32,15 +32,15 @@ endif()
 
 # ------------------------------------------------------------------ library
 add_library(bagatur STATIC
-    src/bagatur/magic.cpp
-    src/bagatur/chess_constants.cpp
-    src/bagatur/zobrist.cpp
-    src/bagatur/castling_config.cpp
-    src/bagatur/castling_util.cpp
-    src/bagatur/see_util.cpp
-    src/bagatur/chess_board.cpp
-    src/bagatur/chess_board_util.cpp
-    src/bagatur/move_generator.cpp
+    src/board/magic.cpp
+    src/board/chess_constants.cpp
+    src/board/zobrist.cpp
+    src/board/castling_config.cpp
+    src/board/castling_util.cpp
+    src/board/see_util.cpp
+    src/board/chess_board.cpp
+    src/board/chess_board_util.cpp
+    src/board/move_generator.cpp
 )
 target_include_directories(bagatur PUBLIC ${CMAKE_SOURCE_DIR}/src)
 

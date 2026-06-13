@@ -5,7 +5,7 @@
 
 #include "types.h"
 
-namespace bagatur::static_moves {
+namespace board::static_moves {
 
 namespace detail {
 
@@ -65,4 +65,4 @@ inline constexpr std::array<BB, 64>                   KNIGHT_MOVES = detail::mak
 inline constexpr std::array<BB, 64>                   KING_MOVES   = detail::make_king_moves();
 inline constexpr std::array<std::array<BB, 64>, 2>    PAWN_ATTACKS = detail::make_pawn_attacks();
 
-}  // namespace bagatur::static_moves
+}  // namespace board::static_moves

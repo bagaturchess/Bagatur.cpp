@@ -11,7 +11,7 @@
 #include "static_moves.h"
 #include "zobrist.h"
 
-namespace bagatur {
+namespace board {
 
 ChessBoard::ChessBoard()
     // Match the prime number used in the Java implementation so the table
@@ -617,4 +617,4 @@ bool ChessBoard::isValidMove(int move) noexcept {
     return true;
 }
 
-}  // namespace bagatur
+}  // namespace board

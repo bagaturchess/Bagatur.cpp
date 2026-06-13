@@ -2,7 +2,7 @@
 
 #include "static_moves.h"
 
-namespace bagatur::cc {
+namespace board::cc {
 
 std::array<std::array<BB, 64>, 64> IN_BETWEEN{};
 std::array<std::array<BB, 64>, 64> PINNED_MOVEMENT{};
@@ -127,4 +127,4 @@ void init() {
     init_king_area();
 }
 
-}  // namespace bagatur::cc
+}  // namespace board::cc

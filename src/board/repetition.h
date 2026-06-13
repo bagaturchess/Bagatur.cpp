@@ -16,7 +16,7 @@
 
 #include "types.h"
 
-namespace bagatur {
+namespace board {
 
 class RepetitionTable {
 public:
@@ -111,4 +111,4 @@ private:
     std::vector<Slot> slots_;
 };
 
-}  // namespace bagatur
+}  // namespace board

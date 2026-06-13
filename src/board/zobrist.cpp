@@ -4,7 +4,7 @@
 
 #include "zobrist.h"
 
-namespace bagatur::zob {
+namespace board::zob {
 
 BB                                              sideToMove = 0;
 std::array<BB, 16>                              castling{};
@@ -304,4 +304,4 @@ void init() {
     sideToMove = static_cast<BB>(NUMBERS[counter++]);
 }
 
-}  // namespace bagatur::zob
+}  // namespace board::zob
