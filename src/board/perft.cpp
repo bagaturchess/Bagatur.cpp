@@ -8,11 +8,11 @@
 #include <string_view>
 #include <vector>
 
-#include "board/chess_board.h"
-#include "board/chess_board_util.h"
-#include "board/move_generator.h"
+#include "chess_board.h"
+#include "chess_board_util.h"
+#include "move_generator.h"
 
-using namespace board;
+namespace board {
 
 static std::uint64_t perft(ChessBoard& cb, MoveGenerator& gen, int depth) {
     if (depth == 0) return 1;
@@ -60,7 +60,7 @@ static const Case kCases[] = {
     { "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - -", 5,    164075551, "Position6 D5" },
 };
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     ChessBoard::initGlobals();
 
     if (argc >= 2 && std::string_view(argv[1]) == "single") {
@@ -105,3 +105,7 @@ int main(int argc, char** argv) {
     std::printf("\nAll perft cases passed.\n");
     return 0;
 }
+
+}  // namespace board
+
+int main(int argc, char** argv) { return board::run(argc, argv); }

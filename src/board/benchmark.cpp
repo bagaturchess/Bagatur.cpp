@@ -7,11 +7,12 @@
 #include <cstdio>
 #include <vector>
 
-#include "board/chess_board.h"
-#include "board/chess_board_util.h"
-#include "board/move_generator.h"
+#include "chess_board.h"
+#include "chess_board_util.h"
+#include "move_generator.h"
 
-using namespace board;
+namespace board {
+
 using clk = std::chrono::steady_clock;
 
 static std::uint64_t perft(ChessBoard& cb, MoveGenerator& gen, int depth) {
@@ -42,7 +43,7 @@ static const Bench kBench[] = {
     { "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",        5, "Position5 D5" },
 };
 
-int main() {
+int run() {
     ChessBoard::initGlobals();
 
     std::uint64_t total_nodes = 0;
@@ -69,3 +70,7 @@ int main() {
                 total_time, (total_nodes / std::max(total_time, 1e-9)) / 1e6);
     return 0;
 }
+
+}  // namespace board
+
+int main() { return board::run(); }

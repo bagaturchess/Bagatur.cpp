@@ -45,8 +45,8 @@ add_library(bagatur STATIC
 target_include_directories(bagatur PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
 # ------------------------------------------------------------------ binaries
-add_executable(perft     src/perft/perft.cpp)
+add_executable(perft     src/board/perft.cpp)
 target_link_libraries(perft     PRIVATE bagatur)
 
-add_executable(benchmark src/benchmark/benchmark.cpp)
+add_executable(benchmark src/board/benchmark.cpp)
 target_link_libraries(benchmark PRIVATE bagatur)
