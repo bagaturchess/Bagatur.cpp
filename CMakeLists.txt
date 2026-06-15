@@ -44,9 +44,37 @@ add_library(bagatur STATIC
 )
 target_include_directories(bagatur PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
+# ------------------------------------------------------------------ nnue lib
+add_library(nnue STATIC src/nnue/nnue.cpp)
+target_include_directories(nnue PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(nnue PUBLIC bagatur)
+if (MSVC)
+    target_compile_options(nnue PRIVATE /arch:AVX2)
+else()
+    target_compile_options(nnue PRIVATE -mavx2 -mfma)
+endif()
+
 # ------------------------------------------------------------------ binaries
 add_executable(perft     src/board/perft.cpp)
 target_link_libraries(perft     PRIVATE bagatur)
 
 add_executable(benchmark src/board/benchmark.cpp)
 target_link_libraries(benchmark PRIVATE bagatur)
+
+add_executable(perft_eval src/nnue/perft_eval.cpp)
+target_link_libraries(perft_eval PRIVATE nnue)
+
+add_executable(benchmark_eval src/nnue/benchmark_eval.cpp)
+target_link_libraries(benchmark_eval PRIVATE nnue)
+
+# ------------------------------------------------------------------ network
+# If network_bagatur.nnue is present in the project root, copy it next to
+# the perft_eval/benchmark_eval binaries so they find it without `cd`.
+if (EXISTS "${CMAKE_SOURCE_DIR}/network_bagatur.nnue")
+    foreach(tgt perft_eval benchmark_eval)
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/network_bagatur.nnue"
+                "$<TARGET_FILE_DIR:${tgt}>/network_bagatur.nnue")
+    endforeach()
+endif()

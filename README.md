@@ -1,5 +1,11 @@
 # Bagatur.cpp
 
-C++20 port of the [Bagatur chess engine](https://github.com/topce/Bagatur) board subsystem.
+C++20 port of the [Bagatur chess engine](https://github.com/topce/Bagatur).
 
-See [src/board/README.md](src/board/README.md) for scope, layout, build instructions and measured throughput.
+| Component                          | Mirrors Java                                            |
+| ---------------------------------- | ------------------------------------------------------- |
+| [src/board](src/board/README.md)   | `bagaturchess.bitboard.impl1` (board + move generation) |
+| [src/nnue](src/nnue/README.md)     | `bagaturchess.nnue_v2` + `impl_nnue_v3.NNUEEvaluator`   |
+
+`network_bagatur.nnue` is expected at the project root and is auto-copied
+next to the eval binaries by CMake on build.
