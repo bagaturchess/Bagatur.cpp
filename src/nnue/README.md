@@ -59,13 +59,43 @@ Incremental updates are mandatory for any kind of perf:
 
 ## SIMD
 
-Hot path uses AVX2 intrinsics (`<immintrin.h>`). The L1 add/sub kernels
-process 64 lanes per loop iteration (`_mm256_add_epi16` × 4); the SCReLU/L2
-kernel widens int16 → int32 with `_mm256_cvtepi16_epi32`, squares with
-`_mm256_mullo_epi32`, and multiply-accumulates against int32 weights.
+Three hot-path implementations are present in `nnue.cpp`; the build picks one
+at compile time based on the standard `__AVX512BW__` / `__AVX2__` predefines:
 
-A scalar fallback exists for non-AVX2 targets but is significantly slower —
-the network is sized for SIMD.
+| ISA      | Lane width | When chosen                                  |
+| -------- | :--------: | -------------------------------------------- |
+| AVX-512  | 32 int16   | `__AVX512F__` + `__AVX512BW__` defined       |
+| AVX-2    | 16 int16   | `__AVX2__` defined                           |
+| scalar   | 1          | neither — portable fallback for verification |
+
+The L1 add/sub/add-sub kernels process 64 (AVX2) or 128 (AVX-512) lanes per
+loop iteration. The SCReLU + L2 dot kernel widens int16 → int32 via the
+respective `cvtepi16_epi32`, squares with `mullo_epi32`, and multiply-
+accumulates against int32 weights. The AVX-512 path uses `_mm512_reduce_add_epi32`
+for the horizontal sum.
+
+### Enabling AVX-512
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBAGATUR_AVX512=ON
+cmake --build build -j
+```
+
+Or directly with g++:
+
+```bash
+g++ -std=c++17 -O3 -march=native -mavx512f -mavx512bw -mavx2 -mfma -flto ...
+```
+
+**Caveat:** an AVX-512 build crashes with `SIGILL` if executed on a CPU that
+does not implement AVX-512F + AVX-512BW. Target CPUs:
+
+- AMD Zen 4 / Zen 5 (Ryzen 7000 / 9000)
+- Intel server: Skylake-X, Cascade Lake, Ice Lake-SP, Sapphire Rapids
+- Intel desktop: Ice Lake / Tiger Lake mobile; **disabled on Alder/Raptor Lake**
+
+For mixed deployments, leave `BAGATUR_AVX512=OFF` (default) — the AVX2 path
+runs on everything from Intel Haswell (2013) / AMD Excavator (2015) onwards.
 
 ## Building
 
@@ -90,15 +120,23 @@ g++ -std=c++17 -O3 -march=native -mavx2 -flto \
 
 ## Measured throughput
 
-`g++ -O3 -march=native -mavx2 -flto`, eval at every visited node:
+Eval at every visited node, `g++ -O3 -march=native -flto`:
 
-| Position    | Depth | Nodes        | Time     | NPS         |
-| ----------- | :---: | -----------: | -------: | ----------: |
-| startpos    |   5   |    4 865 609 |  6.20 s  | 0.79 Mnps   |
-| Kiwipete    |   4   |    4 085 603 |  6.34 s  | 0.64 Mnps   |
-| Position 3  |   5   |      674 624 |  0.82 s  | 0.82 Mnps   |
-| Position 4  |   4   |      422 333 |  0.67 s  | 0.63 Mnps   |
-| Position 5  |   4   |    2 103 487 |  2.87 s  | 0.73 Mnps   |
+| Position    | Depth | Nodes        | AVX2 NPS  | AVX-512 NPS |
+| ----------- | :---: | -----------: | --------: | ----------: |
+| startpos    |   4   |      197 281 | 1.12 Mnps | 1.24 Mnps   |
+| startpos    |   5   |    4 865 609 | 1.08 Mnps | 1.17 Mnps   |
+| Kiwipete    |   4   |    4 085 603 | 0.92 Mnps | 0.97 Mnps   |
+| Position 3  |   5   |      674 624 | 1.11 Mnps | 1.22 Mnps   |
+| Position 4  |   4   |      422 333 | 0.90 Mnps | 0.93 Mnps   |
+| Position 5  |   4   |    2 103 487 | 1.03 Mnps | 1.05 Mnps   |
+
+AVX-512 gains ~6-10% across the mix on this machine. The win is smaller than
+the theoretical 2× because make/unmake is partially memory-bound on L1 weight
+reads (one `add_sub` reads ~6 KB of weights, which fits in L2 but is still
+the latency floor). The SCReLU + L2 dot loop, where AVX-512 helps most,
+contributes ~30-40% of total time, so a 1.5× win there shows up as ~10%
+end-to-end.
 
 For reference, the plain `board::` perft (no eval) on the same mix runs at
 ≈ 20 Mnps, so the eval-per-node cost is ~25–35× the move-generation cost.

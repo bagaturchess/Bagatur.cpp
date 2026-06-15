@@ -45,13 +45,31 @@ add_library(bagatur STATIC
 target_include_directories(bagatur PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
 # ------------------------------------------------------------------ nnue lib
+# Compile-time SIMD target:
+#   default          -> AVX2 (Haswell / Excavator and newer)
+#   -DBAGATUR_AVX512 -> AVX-512F + AVX-512BW (Skylake-X / Ice Lake / Zen 4+)
+# Built binaries crash with illegal-instruction if run on a CPU that does not
+# implement the selected ISA. Pick the lowest common denominator across your
+# deployment targets.
+option(BAGATUR_AVX512 "Compile NNUE with AVX-512 path (CPU must support AVX512F + AVX512BW)" OFF)
+
 add_library(nnue STATIC src/nnue/nnue.cpp)
 target_include_directories(nnue PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(nnue PUBLIC bagatur)
-if (MSVC)
-    target_compile_options(nnue PRIVATE /arch:AVX2)
+
+if (BAGATUR_AVX512)
+    message(STATUS "NNUE: AVX-512 path enabled")
+    if (MSVC)
+        target_compile_options(nnue PRIVATE /arch:AVX512)
+    else()
+        target_compile_options(nnue PRIVATE -mavx512f -mavx512bw -mavx2 -mfma)
+    endif()
 else()
-    target_compile_options(nnue PRIVATE -mavx2 -mfma)
+    if (MSVC)
+        target_compile_options(nnue PRIVATE /arch:AVX2)
+    else()
+        target_compile_options(nnue PRIVATE -mavx2 -mfma)
+    endif()
 endif()
 
 # ------------------------------------------------------------------ binaries

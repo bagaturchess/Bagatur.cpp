@@ -1,7 +1,12 @@
 // nnue.cpp — implementation of the Bullet-style NNUE evaluator.
 //
-// The hot loops are written in AVX2 intrinsics when available; a scalar
-// fallback is kept for portability and for verifying the SIMD results.
+// The hot loops have three implementations:
+//   - AVX-512 (32 int16 lanes per vector) — fastest, requires AVX512F + BW
+//   - AVX2    (16 int16 lanes per vector) — default x86-64 path
+//   - scalar                              — portable fallback for verification
+// Selection is compile-time, driven by the standard `__AVX512BW__` / `__AVX2__`
+// preprocessor macros set by the compiler when the corresponding target flag
+// is on.
 
 #include "nnue.h"
 
@@ -17,11 +22,12 @@
 #include "../board/move_util.h"
 #include "../board/types.h"
 
-#if defined(__AVX2__)
+#if defined(__AVX512BW__) && defined(__AVX512F__)
+#  include <immintrin.h>
+#  define NNUE_HAVE_AVX512 1
+#elif defined(__AVX2__)
 #  include <immintrin.h>
 #  define NNUE_HAVE_AVX2 1
-#else
-#  define NNUE_HAVE_AVX2 0
 #endif
 
 namespace nnue {
@@ -128,7 +134,102 @@ inline int l1_offset(int feature_index, int bucket_index) noexcept {
     return (feature_index + bucket_index * FEATURE_SIZE) * HIDDEN_SIZE;
 }
 
-#if NNUE_HAVE_AVX2
+#if defined(NNUE_HAVE_AVX512)
+
+// AVX-512 path: 32 int16 lanes per __m512i. Hidden layer = 1536 = 48 vectors,
+// unrolled 4× per loop iteration (= 128 lanes per iter, 12 outer iterations).
+inline void v_add(std::int16_t* __restrict v, const std::int16_t* __restrict w) {
+    for (int i = 0; i < HIDDEN_SIZE; i += 32 * 4) {
+        __m512i v0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i));
+        __m512i v1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 32));
+        __m512i v2 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 64));
+        __m512i v3 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 96));
+        v0 = _mm512_add_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i)));
+        v1 = _mm512_add_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 32)));
+        v2 = _mm512_add_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 64)));
+        v3 = _mm512_add_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 96)));
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i),      v0);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 32), v1);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 64), v2);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 96), v3);
+    }
+}
+
+inline void v_sub(std::int16_t* __restrict v, const std::int16_t* __restrict w) {
+    for (int i = 0; i < HIDDEN_SIZE; i += 32 * 4) {
+        __m512i v0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i));
+        __m512i v1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 32));
+        __m512i v2 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 64));
+        __m512i v3 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 96));
+        v0 = _mm512_sub_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i)));
+        v1 = _mm512_sub_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 32)));
+        v2 = _mm512_sub_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 64)));
+        v3 = _mm512_sub_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 96)));
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i),      v0);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 32), v1);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 64), v2);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 96), v3);
+    }
+}
+
+inline void v_add_sub(std::int16_t* __restrict v,
+                      const std::int16_t* __restrict w_add,
+                      const std::int16_t* __restrict w_sub) {
+    for (int i = 0; i < HIDDEN_SIZE; i += 32 * 4) {
+        __m512i v0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i));
+        __m512i v1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 32));
+        __m512i v2 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 64));
+        __m512i v3 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 96));
+        v0 = _mm512_add_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i)));
+        v1 = _mm512_add_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i + 32)));
+        v2 = _mm512_add_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i + 64)));
+        v3 = _mm512_add_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i + 96)));
+        v0 = _mm512_sub_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i)));
+        v1 = _mm512_sub_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i + 32)));
+        v2 = _mm512_sub_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i + 64)));
+        v3 = _mm512_sub_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i + 96)));
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i),      v0);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 32), v1);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 64), v2);
+        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 96), v3);
+    }
+}
+
+// SCReLU + dot. 32 int16 lanes per outer step; widened into 2×16 int32 lanes
+// for the squared/weighted accumulation.
+inline std::int64_t v_screlu_dot(const std::int16_t* __restrict acc,
+                                 const std::int32_t* __restrict weights) {
+    const __m512i lo  = _mm512_setzero_si512();
+    const __m512i hi  = _mm512_set1_epi16(static_cast<std::int16_t>(QA));
+
+    __m512i s0 = _mm512_setzero_si512();
+    __m512i s1 = _mm512_setzero_si512();
+
+    for (int i = 0; i < HIDDEN_SIZE; i += 32) {
+        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(acc + i));
+        v = _mm512_max_epi16(v, lo);
+        v = _mm512_min_epi16(v, hi);
+
+        __m256i v_lo = _mm512_castsi512_si256(v);
+        __m256i v_hi = _mm512_extracti64x4_epi64(v, 1);
+        __m512i a0   = _mm512_cvtepi16_epi32(v_lo);
+        __m512i a1   = _mm512_cvtepi16_epi32(v_hi);
+
+        __m512i sq0 = _mm512_mullo_epi32(a0, a0);
+        __m512i sq1 = _mm512_mullo_epi32(a1, a1);
+
+        __m512i w0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(weights + i));
+        __m512i w1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(weights + i + 16));
+
+        s0 = _mm512_add_epi32(s0, _mm512_mullo_epi32(sq0, w0));
+        s1 = _mm512_add_epi32(s1, _mm512_mullo_epi32(sq1, w1));
+    }
+
+    __m512i s = _mm512_add_epi32(s0, s1);
+    return static_cast<std::int64_t>(_mm512_reduce_add_epi32(s));
+}
+
+#elif defined(NNUE_HAVE_AVX2)
 
 // All three primitives operate on 16-lane int16 vectors (256-bit). The hidden
 // layer is 1536 elements = 96 vectors, unrolled 4× per loop iteration.
@@ -230,7 +331,7 @@ inline std::int64_t v_screlu_dot(const std::int16_t* __restrict acc,
     return total;
 }
 
-#else  // NNUE_HAVE_AVX2 == 0
+#else  // no SIMD path enabled — scalar fallback
 
 inline void v_add(std::int16_t* v, const std::int16_t* w) {
     for (int i = 0; i < HIDDEN_SIZE; ++i) v[i] = static_cast<std::int16_t>(v[i] + w[i]);
