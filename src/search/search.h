@@ -116,8 +116,12 @@ private:
     HistoryTable        history_;
     Killers             killers_;
 
-    // Per-ply data
-    std::array<Stack, MAX_PLY> stacks_{};
+    // Per-ply data. Size is `MAX_PLY + 1` because `update_pv(ply, move)`
+    // reads `stacks_[ply + 1].pv` to build the child PV chain — search() at
+    // ply = MAX_PLY - 1 (last legal ply) needs stacks_[MAX_PLY] to exist.
+    // Without the +1, deep extension chains (e.g. perpetual-check positions
+    // where extensions keep `depth` from decrementing) segfault.
+    std::array<Stack, MAX_PLY + 1> stacks_{};
 
     // One move-generator buffer per ply (caller doesn't recurse with the same
     // gen — MoveGenerator already supports startPly/endPly stacking).

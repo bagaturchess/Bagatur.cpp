@@ -73,8 +73,16 @@ void Searcher::update_pv(int ply, int move) {
     Stack& s = stacks_[ply];
     s.pv[0] = move;
     Stack& next = stacks_[ply + 1];
-    std::memcpy(&s.pv[1], next.pv, next.pv_length * sizeof(int));
-    s.pv_length = next.pv_length + 1;
+    // Defensive cap: Stack.pv has MAX_PLY slots (indices 0..MAX_PLY-1). We
+    // need room for the move at [0] plus up to (MAX_PLY-1) ints from the
+    // child. Without this, deep extension chains can produce a pv_length
+    // that overruns the inline array — Windows surfaces it as a segfault.
+    int copy = next.pv_length;
+    if (copy > MAX_PLY - 1) copy = MAX_PLY - 1;
+    if (copy > 0) {
+        std::memcpy(&s.pv[1], next.pv, copy * sizeof(int));
+    }
+    s.pv_length = copy + 1;
 }
 
 int Searcher::score_capture(int move) const noexcept {
