@@ -478,8 +478,18 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
             if (score > alpha && reduction > 0) {
                 score = -search(ply + 1, new_depth, -alpha - 1, -alpha, false, !cut_node);
             }
-            // PV re-search
-            if (score > alpha && score < beta && is_pv) {
+            // PV re-search.
+            //
+            // The classic PVS condition is `score > alpha && score < beta`, but
+            // in MTD(f) alpha = beta-1 → no integer fits in the open interval
+            // → the re-search would never fire. Without it, every non-first
+            // move that beats alpha gets locked into the is_pv=false subtree
+            // (TT/NMP/razor cutoffs leave child PV empty), and the root PV
+            // truncates well before depth. We drop the `score < beta` gate so
+            // the re-search runs at the moment a non-first move overtakes the
+            // current best — propagating is_pv=true down means the chosen
+            // subtree fills its PV stack properly.
+            if (score > alpha && is_pv) {
                 score = -search(ply + 1, new_depth, -beta, -alpha, true, false);
             }
         }
