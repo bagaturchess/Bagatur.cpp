@@ -242,15 +242,26 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     }
 
     Stack& st = stacks_[ply];
-    int static_eval = in_check ? SCORE_DRAW : evaluate();
+    // SCORE_MIN serves as the "no static eval available" sentinel — set when
+    // we're in check (eval is meaningless there). Mirrors Java's IEvaluator.MIN_EVAL.
+    int static_eval = in_check ? SCORE_MIN : evaluate();
     st.static_eval = static_eval;
 
     // `improving` — true when our static eval climbed since our previous turn
     // (two plies back). Used to gate / scale several pruning heuristics.
     bool improving = false;
-    if (!in_check && ply >= 3) {
+    if (!in_check && ply >= 3 && stacks_[ply - 2].static_eval != SCORE_MIN) {
         improving = static_eval > stacks_[ply - 2].static_eval;
     }
+
+    // CNIR — Consecutive Not-Improving Reduction: when position has been
+    // deteriorating for two consecutive same-colour ply pairs, reduce more.
+    // Mirrors Search_PVS_NWS.java around line 1355.
+    bool not_improving_twice = !improving
+        && ply >= 5
+        && stacks_[ply - 2].static_eval != SCORE_MIN
+        && stacks_[ply - 4].static_eval != SCORE_MIN
+        && stacks_[ply - 2].static_eval <= stacks_[ply - 4].static_eval;
 
     // ----------------------------------------------------------------
     // Pruning at non-PV nodes
@@ -397,7 +408,17 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
                 int rd = std::min(63, depth);
                 int rm = std::min(63, move_count);
                 reduction = (int)kLMR.t[rd][rm];
-                if (is_pv) reduction = std::max(0, reduction - 1);
+
+                // Mirror Search_PVS_NWS LMR adjustments:
+                //   if (!isPv)             reduction += 1;
+                //   if (cutNode)           reduction += 1;
+                //   if (notImprovingTwice) reduction += 1;   // CNIR
+                // (non-PV nodes, expected-fail-high nodes, and deteriorating-
+                //  position branches all get reduced more aggressively)
+                if (!is_pv)              reduction += 1;
+                if (cut_node)            reduction += 1;
+                if (not_improving_twice) reduction += 1;
+
                 if (reduction >= new_depth) reduction = new_depth - 1;
                 if (reduction < 0) reduction = 0;
             }
