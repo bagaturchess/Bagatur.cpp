@@ -85,6 +85,23 @@ target_link_libraries(perft_eval PRIVATE nnue)
 add_executable(benchmark_eval src/nnue/benchmark_eval.cpp)
 target_link_libraries(benchmark_eval PRIVATE nnue)
 
+# ------------------------------------------------------------------ search
+add_library(search STATIC
+    src/search/tt.cpp
+    src/search/search.cpp
+)
+target_include_directories(search PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(search PUBLIC nnue)
+
+add_executable(search_main src/search/search_main.cpp)
+target_link_libraries(search_main PRIVATE search)
+if (EXISTS "${CMAKE_SOURCE_DIR}/network_bagatur.nnue")
+    add_custom_command(TARGET search_main POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/network_bagatur.nnue"
+            "$<TARGET_FILE_DIR:search_main>/network_bagatur.nnue")
+endif()
+
 # ------------------------------------------------------------------ network
 # If network_bagatur.nnue is present in the project root, copy it next to
 # the perft_eval/benchmark_eval binaries so they find it without `cd`.
