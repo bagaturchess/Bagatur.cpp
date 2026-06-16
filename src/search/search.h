@@ -61,6 +61,13 @@ struct Result {
     double         time_secs  = 0.0;
     std::array<int, MAX_PLY> pv{};
     int            pv_length  = 0;
+
+    // MTD(f) reports the score as either a lower or upper bound after each
+    // null-window probe. Mirrors Java's `info.setLowerBound/UpperBound`. UCI
+    // convention: append `lowerbound`/`upperbound` to the info line; skip the
+    // `pv` segment on upper-bound (the move that "failed least" is unreliable).
+    bool           lower_bound = false;
+    bool           upper_bound = false;
 };
 
 class Searcher {

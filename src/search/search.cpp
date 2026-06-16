@@ -104,9 +104,16 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     }
     if (ply >= MAX_PLY) return evaluate();
 
-    // Repetition / 50-move
+    // Repetition / 50-move — mirrors SearchImpl.isDraw():
+    //   non-PV: 2nd occurrence is enough (a side that can force a repeat
+    //           can drive towards the actual 3-fold; bound the score now).
+    //   PV:     wait for the real 3-fold so we don't print a phantom PV.
+    // Without this, drawn endgames spin in the MTD(f) loop — every search
+    // call returns instantly (no draw cut), depth bumps without bound, and
+    // no `on_iteration` fires because the score never sharpens past the
+    // initial seed — so the GUI sees no PV at all.
     if (cb_.lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
-    if (cb_.getRepetition() >= 2) return SCORE_DRAW;
+    if (cb_.getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
 
     const int alpha_orig = alpha;   // saved for the alpha-restore step at the end
 
@@ -248,9 +255,10 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
 
     if (ply >= MAX_PLY) return evaluate();
 
-    // Repetition / 50-move
+    // Repetition / 50-move — non-PV bails on 2nd visit. See qsearch() above
+    // for the full rationale; same convention.
     if (cb_.lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
-    if (cb_.getRepetition() >= 2) return SCORE_DRAW;
+    if (cb_.getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
 
     // Mate distance pruning.
     int mate_alpha = std::max(alpha, mated_in(ply));
@@ -681,12 +689,15 @@ Result Searcher::goMTD(const Limits& lim) {
         // the depth. Mirrors Java's `sentPV = (eval >= getLowerBound())` /
         // `sentPV = (eval <= getUpperBound())` test on line 227 / 264.
         bool advanced;
+        bool is_lower;   // failed-high → eval is a lower bound on the true score
         if (eval >= beta) {
             advanced = (eval >= mgr.getLowerBound());
             mgr.increaseLowerBound(eval);
+            is_lower = true;
         } else {
             advanced = (eval <= mgr.getUpperBound());
             mgr.decreaseUpperBound(eval);
+            is_lower = false;
         }
 
         // Only update the public Result and fire the info callback when the
@@ -698,7 +709,9 @@ Result Searcher::goMTD(const Limits& lim) {
                 std::memcpy(best.pv.data(), s.pv, s.pv_length * sizeof(int));
                 best.pv_length = s.pv_length;
             }
-            best.score = eval;
+            best.score       = eval;
+            best.lower_bound = is_lower;
+            best.upper_bound = !is_lower;
             // The MTDSearchManager may have just incremented current_depth_
             // if this call converged. Report the depth we actually searched.
             best.depth = depth;

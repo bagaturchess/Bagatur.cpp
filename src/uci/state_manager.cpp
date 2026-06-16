@@ -23,15 +23,28 @@ namespace {
 // Per-iteration info callback — runs on the search thread and prints UCI
 // "info" lines directly to stdout. Atomic flush after each line keeps GUIs
 // like cutechess responsive.
+//
+// Mirrors Java SearchInfoUtils.buildMajorInfoCommand():
+//   * append `lowerbound` / `upperbound` after the score
+//   * skip the `pv` segment when the score is an upper bound (the best move
+//     from a failed-low MTD probe is "the one that failed least" — printing
+//     it as PV misleads the GUI).
 void info_callback(const search::Result& r, void* /*user*/) {
-    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu score cp %d pv",
+    const char* bound_suffix = r.lower_bound ? " lowerbound"
+                             : r.upper_bound ? " upperbound"
+                                             : "";
+    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu score cp %d%s",
                 r.depth, r.seldepth,
                 static_cast<unsigned long long>(r.nodes),
                 r.time_secs * 1000.0,
                 static_cast<unsigned long long>(r.nodes / std::max(r.time_secs, 1e-9)),
-                r.score);
-    for (int i = 0; i < r.pv_length; ++i) {
-        std::printf(" %s", move_to_uci(r.pv[i]).c_str());
+                r.score,
+                bound_suffix);
+    if (!r.upper_bound) {
+        std::printf(" pv");
+        for (int i = 0; i < r.pv_length; ++i) {
+            std::printf(" %s", move_to_uci(r.pv[i]).c_str());
+        }
     }
     std::printf("\n");
     std::fflush(stdout);
