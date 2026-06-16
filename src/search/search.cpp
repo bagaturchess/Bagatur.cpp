@@ -84,7 +84,9 @@ int Searcher::score_capture(int move) const noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// qsearch
+// qsearch — captures + promotions only, prunes losing captures by SEE<0.
+// Mirrors bagaturchess.Search_PVS_NWS.qsearch(): no delta/futility pruning
+// inside the loop; legality of remaining moves is the SEE filter alone.
 // ---------------------------------------------------------------------------
 int Searcher::qsearch(int ply, int alpha, int beta) {
     ++nodes_;
@@ -99,6 +101,8 @@ int Searcher::qsearch(int ply, int alpha, int beta) {
     // Repetition / 50-move
     if (cb_.lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
     if (cb_.getRepetition() >= 2) return SCORE_DRAW;
+
+    const int alpha_orig = alpha;   // saved for the alpha-restore step at the end
 
     int stand = evaluate();
     if (stand >= beta) return stand;
@@ -132,12 +136,9 @@ int Searcher::qsearch(int ply, int alpha, int beta) {
         }
         int m = buf_moves[picked];
 
-        // Skip losing captures (delta pruning by piece value).
-        int captured = board::mv::attacked_piece_index(m);
-        if (captured != 0 && stand + PIECE_VAL[captured] + 200 < alpha &&
-            !board::mv::is_promotion(m)) {
-            continue;
-        }
+        // SEE pruning — skip captures that lose material on the static exchange.
+        // Java line 2079-2084: int see = ...; if (see < 0) continue;
+        if (board::see::getSeeCaptureScore(cb_, m) < 0) continue;
 
         int side = cb_.colorToMove;
         cb_.doMove(m);
@@ -156,6 +157,13 @@ int Searcher::qsearch(int ply, int alpha, int beta) {
             }
         }
     }
+
+    // Alpha-restore (Java line 2163-2175, `isOther_UseAlphaOptimizationInQSearch`).
+    // If neither stand-pat nor any capture exceeded the *input* alpha, clamp
+    // the return value back up to alpha_orig — turns fail-soft below alpha
+    // into fail-hard at alpha. Makes the TT bound stored at the caller tighter.
+    if (alpha_orig > best) best = alpha_orig;
+
     return best;
 }
 
