@@ -92,7 +92,7 @@ private:
 
     // Core recursive routines.
     int search(int ply, int depth, int alpha, int beta, bool is_pv, bool cut_node);
-    int qsearch(int ply, int alpha, int beta);
+    int qsearch(int ply, int alpha, int beta, bool is_pv);
 
     // Helpers
     int  evaluate();

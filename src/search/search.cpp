@@ -88,8 +88,13 @@ int Searcher::score_capture(int move) const noexcept {
 // qsearch — captures + promotions only, prunes losing captures by SEE<0.
 // Mirrors bagaturchess.Search_PVS_NWS.qsearch(): no delta/futility pruning
 // inside the loop; legality of remaining moves is the SEE filter alone.
+//
+// Probes and stores the transposition table with depth=0 — Java does the same
+// (line 2178-2181). Entries placed by qsearch share the table with search()
+// entries; depth-comparison logic naturally keeps higher-depth entries when
+// the bucket is contested.
 // ---------------------------------------------------------------------------
-int Searcher::qsearch(int ply, int alpha, int beta) {
+int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     ++nodes_;
     if (ply > sel_depth_) sel_depth_ = ply;
 
@@ -105,16 +110,37 @@ int Searcher::qsearch(int ply, int alpha, int beta) {
 
     const int alpha_orig = alpha;   // saved for the alpha-restore step at the end
 
+    // ----------------------------------------------------------------
+    // TT probe (Java qsearch lines 1928-1978). Reused for both the
+    // cutoff (non-PV nodes only) and to bias move ordering by TT move.
+    // ----------------------------------------------------------------
+    int     tt_move  = 0;
+    TTEntry tte;
+    if (tt_.probe(cb_.zobristKey, tte)) {
+        int tt_score = score_from_tt(tte.score, ply);
+        tt_move      = tte.move;
+
+        if (!is_pv) {
+            if (tte.flag == TT_EXACT) return tt_score;
+            if (tte.flag == TT_LOWER && tt_score >= beta)  return tt_score;
+            if (tte.flag == TT_UPPER && tt_score <= alpha) return tt_score;
+        }
+    }
+
     int stand = evaluate();
     if (stand >= beta) return stand;
     if (stand > alpha) alpha = stand;
 
-    int best = stand;
+    int best      = stand;
+    int best_move = 0;
 
     gen_.startPly();
     gen_.generateAttacks(cb_);
 
     // Score captures by MVV-LVA inline (no full sort — picks max each iter).
+    // Boost the TT move so it's always tried first when present (Java's
+    // PHASE_TT applies the same idea, but only when ttMove is a capture or
+    // promotion — qsearch otherwise wouldn't reach it).
     int  buf_moves[256];
     int  buf_scores[256];
     int  n = 0;
@@ -122,7 +148,7 @@ int Searcher::qsearch(int ply, int alpha, int beta) {
         int m = gen_.next();
         if (!cb_.isLegal(m)) continue;
         buf_moves[n]  = m;
-        buf_scores[n] = score_capture(m);
+        buf_scores[n] = (m == tt_move) ? SCORE_TT_MOVE : score_capture(m);
         ++n;
     }
     gen_.endPly();
@@ -144,14 +170,15 @@ int Searcher::qsearch(int ply, int alpha, int beta) {
         int side = cb_.colorToMove;
         cb_.doMove(m);
         eval_.after_make(cb_, m, side);
-        int score = -qsearch(ply + 1, -beta, -alpha);
+        int score = -qsearch(ply + 1, -beta, -alpha, is_pv);
         eval_.after_unmake(cb_, m, side);
         cb_.undoMove(m);
 
         if (aborted_) return alpha;
 
         if (score > best) {
-            best = score;
+            best      = score;
+            best_move = m;
             if (score > alpha) {
                 alpha = score;
                 if (score >= beta) break;
@@ -163,7 +190,21 @@ int Searcher::qsearch(int ply, int alpha, int beta) {
     // If neither stand-pat nor any capture exceeded the *input* alpha, clamp
     // the return value back up to alpha_orig — turns fail-soft below alpha
     // into fail-hard at alpha. Makes the TT bound stored at the caller tighter.
-    if (alpha_orig > best) best = alpha_orig;
+    if (alpha_orig > best) {
+        best      = alpha_orig;
+        best_move = 0;
+    }
+
+    // ----------------------------------------------------------------
+    // TT store at depth 0 (Java line 2178-2181). Same flag formula as
+    // search()'s end-of-node store:
+    //   best >= beta        → TT_LOWER (fail-high)
+    //   best > alpha_orig   → TT_EXACT
+    //   otherwise           → TT_UPPER (fail-low / alpha-restore)
+    // ----------------------------------------------------------------
+    TTFlag flag = (best >= beta) ? TT_LOWER
+                 : (best > alpha_orig ? TT_EXACT : TT_UPPER);
+    tt_.store(cb_.zobristKey, best_move, best, stand, /*depth=*/0, flag, ply);
 
     return best;
 }
@@ -219,7 +260,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     beta  = mate_beta;
 
     // qsearch at horizon
-    if (depth <= 0) return qsearch(ply, alpha, beta);
+    if (depth <= 0) return qsearch(ply, alpha, beta, is_pv);
 
     ++nodes_;
     if (ply > sel_depth_) sel_depth_ = ply;
@@ -306,7 +347,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
             if (depth <= 4) {
                 int razor_margin = 260 * depth;
                 if (static_eval + razor_margin < alpha) {
-                    int v = qsearch(ply, alpha, alpha + 1);
+                    int v = qsearch(ply, alpha, alpha + 1, /*is_pv=*/false);
                     if (v < alpha) return v;
                 }
             }
