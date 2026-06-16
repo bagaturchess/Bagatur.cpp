@@ -9,6 +9,7 @@
 
 #include "../board/move_util.h"
 #include "../board/see_util.h"
+#include "mtd.h"
 
 namespace search {
 
@@ -442,9 +443,14 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         if (score > best_score) {
             best_score = score;
             best_move  = m;
+            // Record the principal variation on every new best move, not just
+            // when alpha is improved. This way null-window searches (alpha =
+            // beta - 1, e.g. MTD(f)) still propagate a "best line so far" up
+            // through the recursion, instead of bottoming out at the first
+            // fail-low parent.
+            update_pv(ply, m);
             if (score > alpha) {
                 alpha = score;
-                if (is_pv) update_pv(ply, m);
             }
             if (alpha >= beta) {
                 if (is_quiet_move) {
@@ -515,9 +521,16 @@ done:
 }
 
 // ---------------------------------------------------------------------------
-// Iterative deepening driver
+// Top-level dispatch
 // ---------------------------------------------------------------------------
 Result Searcher::go(const Limits& lim) {
+    return lim.use_mtd ? goMTD(lim) : goPVS(lim);
+}
+
+// ---------------------------------------------------------------------------
+// Classic iterative deepening (PVS-only). Used when `Limits::use_mtd == false`.
+// ---------------------------------------------------------------------------
+Result Searcher::goPVS(const Limits& lim) {
     nodes_      = 0;
     node_check_ = 0;
     sel_depth_  = 0;
@@ -558,6 +571,110 @@ Result Searcher::go(const Limits& lim) {
 
         if (time_up() || stop_.load(std::memory_order_relaxed)) break;
         if (is_mate_score(score)) break;  // already mated, no point going deeper
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------------------
+// MTD(f) γ-stepping driver
+//
+// Direct port of the loop in
+// bagaturchess.search.impl.rootsearch.sequential.SequentialSearch_MTD.negamax()
+// + bagaturchess.search.impl.rootsearch.sequential.mtd.NullwinSearchTask.run().
+//
+// Each iteration of the inner loop is one "NullwinSearchTask":
+//   1. Pop the next beta from MTDSearchManager.
+//   2. Run a null-window search at the manager's current depth: [beta-1, beta].
+//   3. Update lower/upper bound based on whether the search failed high/low.
+//   4. The manager auto-detects convergence and bumps the depth when bounds
+//      have collapsed within TRUST_WINDOW_BEST_MOVE.
+// ---------------------------------------------------------------------------
+Result Searcher::goMTD(const Limits& lim) {
+    nodes_      = 0;
+    node_check_ = 0;
+    sel_depth_  = 0;
+    aborted_    = false;
+    stop_.store(false, std::memory_order_relaxed);
+    max_time_s_ = lim.max_time_secs;
+    max_nodes_  = lim.max_nodes;
+    start_      = std::chrono::steady_clock::now();
+    tt_.new_search();
+    killers_.clear();
+    eval_.reset(cb_);
+
+    // Initial seed value — full static eval at the root. Same scale as what
+    // search() returns (side-to-move PoV in negamax).
+    int initial_val = eval_.evaluate(cb_);
+
+    MTDSearchManager mgr(/*start_depth=*/1, /*max_iterations=*/lim.max_depth, initial_val);
+
+    Result best{};
+    best.score = initial_val;
+    best.depth = 0;
+
+    while (!stop_.load(std::memory_order_relaxed) &&
+           mgr.getCurrentDepth() <= mgr.getMaxIterations()) {
+
+        int depth = mgr.getCurrentDepth();
+        int beta  = mgr.nextBeta();
+
+        // Clamp beta to avoid degenerate windows when both bounds collapse
+        // (mate scores or extreme initial seeds).
+        if (beta <= SCORE_MIN + 1) beta = SCORE_MIN + 2;
+        if (beta >= SCORE_MAX - 1) beta = SCORE_MAX - 2;
+
+        // Reset the root PV stack so we can grab a fresh PV after the search.
+        stacks_[1].pv_length = 0;
+
+        // Null-window search at [beta-1, beta]. is_pv stays true so the root
+        // PV gets populated; deeper recursion naturally enters non-PV branches
+        // because the window is null.
+        int eval = search(/*ply=*/1, depth, beta - 1, beta,
+                          /*is_pv=*/true, /*cut_node=*/false);
+
+        if (aborted_) break;
+
+        // Check whether THIS eval would actually sharpen the bound *before*
+        // calling the manager — `increaseLowerBound` / `decreaseUpperBound`
+        // may reset bounds to [MIN, MAX] when they trigger isLast() and bump
+        // the depth. Mirrors Java's `sentPV = (eval >= getLowerBound())` /
+        // `sentPV = (eval <= getUpperBound())` test on line 227 / 264.
+        bool advanced;
+        if (eval >= beta) {
+            advanced = (eval >= mgr.getLowerBound());
+            mgr.increaseLowerBound(eval);
+        } else {
+            advanced = (eval <= mgr.getUpperBound());
+            mgr.decreaseUpperBound(eval);
+        }
+
+        // Only update the public Result and fire the info callback when the
+        // bound was actually tightened. Mirrors Java's "sentPV" gate.
+        if (advanced) {
+            Stack& s = stacks_[1];
+            if (s.pv_length > 0) {
+                best.best_move = s.pv[0];
+                std::memcpy(best.pv.data(), s.pv, s.pv_length * sizeof(int));
+                best.pv_length = s.pv_length;
+            }
+            best.score = eval;
+            // The MTDSearchManager may have just incremented current_depth_
+            // if this call converged. Report the depth we actually searched.
+            best.depth = depth;
+
+            auto now      = std::chrono::steady_clock::now();
+            best.time_secs= std::chrono::duration<double>(now - start_).count();
+            best.nodes    = nodes_;
+            best.seldepth = sel_depth_;
+
+            if (lim.on_iteration) lim.on_iteration(best, lim.callback_user);
+        }
+
+        if (time_up() || stop_.load(std::memory_order_relaxed)) break;
+
+        // Mate found in the proved interval — no value in chasing more depth.
+        if (is_mate_score(mgr.getLowerBound()) && mgr.getLowerBound() > 0) break;
+        if (is_mate_score(mgr.getUpperBound()) && mgr.getUpperBound() < 0) break;
     }
     return best;
 }

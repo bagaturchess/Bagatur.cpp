@@ -41,7 +41,12 @@ struct Limits {
     std::uint64_t  max_nodes     = 0;             // 0 = unlimited
     double         max_time_secs = 0.0;           // 0 = unlimited
 
-    // Optional: fired at the end of every completed ID iteration.
+    // Root-search algorithm. When `true`, runs MTD(f) γ-stepping over null
+    // windows. When `false`, runs the classic PVS iterative-deepening loop.
+    bool           use_mtd       = true;
+
+    // Optional: fired at every refined info (every ID iteration in PVS mode,
+    // every tightened bound in MTD mode).
     using InfoCallback = void(*)(const Result&, void* user);
     InfoCallback   on_iteration  = nullptr;
     void*          callback_user = nullptr;
@@ -80,6 +85,10 @@ private:
         int  killer1 = 0;
         int  killer2 = 0;
     };
+
+    // Top-level drivers.
+    Result goPVS(const Limits& lim);   // classic iterative deepening
+    Result goMTD(const Limits& lim);   // MTD(f) γ-stepping
 
     // Core recursive routines.
     int search(int ply, int depth, int alpha, int beta, bool is_pv, bool cut_node);

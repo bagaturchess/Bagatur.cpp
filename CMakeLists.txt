@@ -88,6 +88,7 @@ target_link_libraries(benchmark_eval PRIVATE nnue)
 # ------------------------------------------------------------------ search
 add_library(search STATIC
     src/search/tt.cpp
+    src/search/mtd.cpp
     src/search/search.cpp
 )
 target_include_directories(search PUBLIC ${CMAKE_SOURCE_DIR}/src)
