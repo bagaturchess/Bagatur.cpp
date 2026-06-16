@@ -364,7 +364,13 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
 
     // Internal iterative reduction: if we got nothing from the TT and we're
     // at non-shallow depth, reducing here often pays for itself.
-    if (depth >= 4 && tt_move == 0) --depth;
+    //
+    // Gated on `!is_pv` to mirror Java Search_PVS_NWS.java:686-698 — applying
+    // it at PV nodes silently shortens the search depth along the PV chain
+    // (every PV node with a missing TT move loses a ply), so the reported PV
+    // ends short of nominal depth. Non-PV nodes don't carry the PV chain, so
+    // the reduction there has no effect on the displayed PV.
+    if (!is_pv && depth >= 4 && tt_move == 0) --depth;
 
     // ----------------------------------------------------------------
     // Collect & order moves
