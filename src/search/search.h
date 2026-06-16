@@ -60,7 +60,7 @@ struct Result {
 
 class Searcher {
 public:
-    Searcher(board::ChessBoard& cb, std::size_t tt_mb = 64);
+    Searcher(board::ChessBoard& cb, std::size_t tt_mb = 512);
 
     // Run iterative deepening up to the given limits. Returns the best move &
     // score found at the deepest fully completed iteration.

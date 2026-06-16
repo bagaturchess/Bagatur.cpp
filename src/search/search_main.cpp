@@ -68,7 +68,7 @@ int run(int argc, char** argv) {
 
     auto cb = board::cbu::getNewCB(fen);
     // Heap-allocate — Searcher carries multi-MB accumulator/PV stacks.
-    auto sr = std::make_unique<Searcher>(*cb, /*tt_mb=*/64);
+    auto sr = std::make_unique<Searcher>(*cb, /*tt_mb=*/512);
 
     Limits lim;
     lim.max_depth     = depth;

@@ -25,8 +25,10 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../board/chess_board.h"
 
@@ -102,6 +104,50 @@ struct alignas(64) Accumulator {
     void set_bucket(int b) noexcept { bucket_index = b; }
 };
 
+// EvalCache — small open-addressed table keyed by the upper 32 bits of the
+// zobrist key. The NNUE network is purely a function of the piece layout +
+// side-to-move, which the zobrist key captures exactly, so caching the
+// final eval by zobrist is safe and saves the entire SCReLU + L2 pass on
+// repeated visits.
+//
+// Entries are 8 bytes (4-byte key fragment + 4-byte score). `INT_MIN` is
+// reserved as the empty sentinel — a real NNUE eval cannot reach that.
+class EvalCache {
+public:
+    static constexpr int DEFAULT_MB = 128;
+
+    explicit EvalCache(std::size_t mb = DEFAULT_MB) { resize(mb); }
+
+    void resize(std::size_t mb);
+    void clear() noexcept;
+
+    bool probe(std::uint64_t key, int& score) const noexcept {
+        const Entry& e = table_[static_cast<std::size_t>(key) & mask_];
+        if (e.score == EMPTY_SCORE) return false;
+        if (e.key32 != static_cast<std::uint32_t>(key >> 32)) return false;
+        score = e.score;
+        return true;
+    }
+
+    void store(std::uint64_t key, int score) noexcept {
+        Entry& e = table_[static_cast<std::size_t>(key) & mask_];
+        e.key32  = static_cast<std::uint32_t>(key >> 32);
+        e.score  = score;
+    }
+
+private:
+    static constexpr std::int32_t EMPTY_SCORE = (std::numeric_limits<std::int32_t>::min)();
+
+    struct Entry {
+        std::uint32_t key32;
+        std::int32_t  score;
+    };
+    static_assert(sizeof(Entry) == 8, "EvalCache entry should be 8 bytes");
+
+    std::vector<Entry> table_;
+    std::size_t        mask_ = 0;
+};
+
 // Evaluator — holds white + black accumulators and a small undo stack so
 // incremental updates can be rolled back when the search backs out.
 class Evaluator {
@@ -121,6 +167,10 @@ public:
     // Evaluate the current position. Returns signed centipawn-like value
     // from the side-to-move PoV.
     int evaluate(const board::ChessBoard& cb);
+
+    // Access to the embedded eval cache (resize / clear / stats).
+    EvalCache&       eval_cache() noexcept       { return eval_cache_; }
+    const EvalCache& eval_cache() const noexcept { return eval_cache_; }
 
 private:
     void full_refresh(const board::ChessBoard& cb);
@@ -148,6 +198,8 @@ private:
     };
     std::array<Frame, MAX_STACK> stack_;
     int                          stack_top_ = 0;
+
+    EvalCache                    eval_cache_{};
 };
 
 // Helpers exposed for the unit tests / verification.

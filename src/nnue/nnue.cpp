@@ -126,6 +126,29 @@ void Accumulator::reset_to_biases() noexcept {
 }
 
 // ----------------------------------------------------------------------------
+// EvalCache
+// ----------------------------------------------------------------------------
+namespace {
+inline std::size_t round_down_pow2(std::size_t v) noexcept {
+    std::size_t r = 1;
+    while ((r << 1) <= v) r <<= 1;
+    return r;
+}
+}  // namespace
+
+void EvalCache::resize(std::size_t mb) {
+    std::size_t bytes   = mb * (1ull << 20);
+    std::size_t entries = round_down_pow2(bytes / sizeof(Entry));
+    if (entries < 1024) entries = 1024;
+    table_.assign(entries, Entry{0, EMPTY_SCORE});
+    mask_ = entries - 1;
+}
+
+void EvalCache::clear() noexcept {
+    for (Entry& e : table_) { e.key32 = 0; e.score = EMPTY_SCORE; }
+}
+
+// ----------------------------------------------------------------------------
 // Vectorised L1 add / sub helpers
 // ----------------------------------------------------------------------------
 namespace {
@@ -535,8 +558,13 @@ void Evaluator::after_unmake(const board::ChessBoard& /*cb*/, int /*move*/, int 
 
 // ----------------------------------------------------------------------------
 // Final eval: SCReLU + dot product through L2.
+// Goes through the embedded EvalCache — if the position's zobrist is already
+// in the cache, the entire SCReLU + L2 pass is skipped.
 // ----------------------------------------------------------------------------
 int Evaluator::evaluate(const board::ChessBoard& cb) {
+    int cached;
+    if (eval_cache_.probe(cb.zobristKey, cached)) return cached;
+
     int piece_count = board::popcount(cb.allPieces);
     int bucket      = detail::choose_output_bucket(piece_count);
 
@@ -553,7 +581,10 @@ int Evaluator::evaluate(const board::ChessBoard& cb) {
     sum += net.output_bias(bucket);
     sum *= SCALE;
     sum /= (QA * QB);
-    return static_cast<int>(sum);
+    int eval = static_cast<int>(sum);
+
+    eval_cache_.store(cb.zobristKey, eval);
+    return eval;
 }
 
 }  // namespace nnue

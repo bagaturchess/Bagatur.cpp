@@ -38,7 +38,7 @@ static_assert(sizeof(TTBucket) == 64, "Bucket should be one cache line");
 
 class TranspositionTable {
 public:
-    explicit TranspositionTable(std::size_t mb = 64);
+    explicit TranspositionTable(std::size_t mb = 512);
     void resize(std::size_t mb);
     void clear();
     void new_search() noexcept { ++gen_; }
