@@ -49,9 +49,28 @@ double per_move_budget_ms(TCType type, const Go& go, int colour) noexcept {
             return std::max(1.0, clock / mtg + inc);
         }
         case TCType::INCREMENT_PER_MOVE: {
-            // FloatingTime divides by 35 and reserves the increment.
+            // 1:1 port of TimeController_FloatingTime.setupMinMoveTimeAndTotalClockTime():
+            //   totalClockTime = clock / emergency             (emergency = 1 for FloatingTime)
+            //   if totalClockTime >= 35 * inc → minMoveTime = max(clock/35, inc)
+            //   else                          → minMoveTime = min(clock/35, inc)
+            //
+            // Earlier the code did `clock/35 + inc`, which adds `inc` on TOP of
+            // the per-move slice — at 1 min + 1 sec the budget came out to
+            // 2.47 s per move (vs Java's 1.57 s), so the engine bled ~1.5 s
+            // every move and flagged around move 35.
+            //
+            // The dynamic moveeval-diff component (up to 20% of totalClockTime,
+            // grown during the search) is not implemented here — using
+            // minMoveTime as a fixed budget is the safe approximation: never
+            // overspends the clock, may leave some time on quiet positions.
             double base = clock / BAGATUR_DIVIDE_FACTOR_DEFAULT;
-            return std::max(1.0, base + inc);
+            double min_move_time;
+            if (clock >= BAGATUR_DIVIDE_FACTOR_DEFAULT * inc) {
+                min_move_time = std::max(base, inc);
+            } else {
+                min_move_time = std::min(base, inc);
+            }
+            return std::max(1.0, min_move_time);
         }
         case TCType::SUDDEN_DEATH: {
             // FloatingTime / SuddenDeath:
