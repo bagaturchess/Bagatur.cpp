@@ -683,10 +683,21 @@ Result Searcher::goMTD(const Limits& lim) {
         int depth = mgr.getCurrentDepth();
         int beta  = mgr.nextBeta();
 
-        // Clamp beta to avoid degenerate windows when both bounds collapse
-        // (mate scores or extreme initial seeds).
-        if (beta <= SCORE_MIN + 1) beta = SCORE_MIN + 2;
-        if (beta >= SCORE_MAX - 1) beta = SCORE_MAX - 2;
+        // Clamp beta so the null window [β-1, β] survives mate-distance
+        // pruning at root (ply=1). search() does:
+        //
+        //   mate_alpha = max(alpha, mated_in(1) = -MAX_MATE+1)
+        //   mate_beta  = min(beta,  mate_in(2)  =  MAX_MATE-2)
+        //   if (mate_alpha >= mate_beta) return mate_alpha;
+        //
+        // The previous clamp left β = SCORE_MIN+2 = -MAX_MATE+1 (or
+        // SCORE_MAX-2 at the high end). Both collapse the post-prune window
+        // to empty, so search() returns immediately — no PV is built, the
+        // MTD bounds never tighten, and the iteration silently spins.
+        //
+        // Safe band: `mated_in(1) + 1 ≤ β ≤ mate_in(2)`.
+        if (beta <= mated_in(1)) beta = mated_in(1) + 1;
+        if (beta >  mate_in(2))  beta = mate_in(2);
 
         // Reset the root PV stack so we can grab a fresh PV after the search.
         stacks_[1].pv_length = 0;
