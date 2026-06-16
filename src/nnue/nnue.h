@@ -67,15 +67,25 @@ inline constexpr std::array<int, 64> INPUT_BUCKETS = {
     6, 6, 6, 6, 6, 6, 6, 6,
 };
 
-// Network singleton (loaded lazily from ./network_bagatur.nnue).
+// Network singleton.
+//
+// Default load order on first `instance()`:
+//   1. If the binary was built with `BAGATUR_EMBEDDED_NETWORK` (CMake sees
+//      `network_bagatur.nnue` in the project root), use the embedded blob.
+//      This is the production path for distribution — no external file, no
+//      working-directory surprises.
+//   2. Otherwise fall back to `./network_bagatur.nnue` on disk.
+//
+// `load_from(path)` is a test-only override.
 class Network {
 public:
-    // Loads on first call; throws std::runtime_error on I/O / size failure.
-    // Subsequent calls are O(1).
     static const Network& instance();
 
     // Loads from an explicit path (override). Use for tests.
     static void load_from(const std::string& path);
+
+    // Loads from an in-memory blob (override). Use for tests.
+    static void load_from_memory(const std::uint8_t* data, std::size_t size);
 
     // L1Weights stored flat: [(feature + bucket * FEATURE_SIZE) * HIDDEN_SIZE + j].
     const std::int16_t* l1_weights() const noexcept { return l1_weights_.data(); }
@@ -87,6 +97,7 @@ public:
 private:
     Network() = default;
     void load(const std::string& path);
+    void load_mem(const std::uint8_t* data, std::size_t size);
 
     std::vector<std::int16_t>                       l1_weights_;
     std::array<std::int16_t, HIDDEN_SIZE>           l1_biases_{};

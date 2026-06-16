@@ -27,6 +27,18 @@ else()
     check_ipo_supported(RESULT lto_ok)
     if (lto_ok)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+        # GCC LTO needs the wrapper ar / ranlib to keep static archives
+        # readable by the LTO linker plugin. Plain `ar` silently drops the
+        # bytecode index, which surfaces later as "undefined reference" at
+        # the final link step.
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            find_program(GCC_AR_BIN     gcc-ar)
+            find_program(GCC_RANLIB_BIN gcc-ranlib)
+            if (GCC_AR_BIN AND GCC_RANLIB_BIN)
+                set(CMAKE_AR     "${GCC_AR_BIN}"     CACHE FILEPATH "GCC LTO-aware ar"     FORCE)
+                set(CMAKE_RANLIB "${GCC_RANLIB_BIN}" CACHE FILEPATH "GCC LTO-aware ranlib" FORCE)
+            endif()
+        endif()
     endif()
 endif()
 
@@ -56,6 +68,24 @@ option(BAGATUR_AVX512 "Compile NNUE with AVX-512 path (CPU must support AVX512F 
 add_library(nnue STATIC src/nnue/nnue.cpp)
 target_include_directories(nnue PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(nnue PUBLIC bagatur)
+
+# ------------------------------------------------------------------ embedded network
+# If network_bagatur.nnue is present in the project root, embed it directly
+# into the nnue library as a C array so the engine has no runtime file
+# dependency. The generated TU lives under build/generated/ and is added
+# to the `nnue` target sources.
+set(BAGATUR_NETWORK_FILE "${CMAKE_SOURCE_DIR}/network_bagatur.nnue")
+set(BAGATUR_HAS_EMBEDDED_NETWORK FALSE)
+if (EXISTS "${BAGATUR_NETWORK_FILE}")
+    include("${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake")
+    set(BAGATUR_NETWORK_CPP "${CMAKE_BINARY_DIR}/generated/bagatur_network_embedded.cpp")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+    embed_binary("${BAGATUR_NETWORK_FILE}" "${BAGATUR_NETWORK_CPP}" "kBagaturNetwork")
+    set(BAGATUR_HAS_EMBEDDED_NETWORK TRUE)
+    message(STATUS "NNUE: network_bagatur.nnue will be embedded into Bagatur.cpp-x64")
+else()
+    message(STATUS "NNUE: no network_bagatur.nnue in project root — engine will read it from CWD at startup")
+endif()
 
 if (BAGATUR_AVX512)
     message(STATUS "NNUE: AVX-512 path enabled")
@@ -96,21 +126,35 @@ target_link_libraries(search PUBLIC nnue)
 
 add_executable(search_main src/search/search_main.cpp)
 target_link_libraries(search_main PRIVATE search)
-if (EXISTS "${CMAKE_SOURCE_DIR}/network_bagatur.nnue")
-    add_custom_command(TARGET search_main POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/network_bagatur.nnue"
-            "$<TARGET_FILE_DIR:search_main>/network_bagatur.nnue")
+
+# ------------------------------------------------------------------ uci
+add_library(uci STATIC
+    src/uci/go.cpp
+    src/uci/position.cpp
+    src/uci/time_control.cpp
+    src/uci/uci_move.cpp
+    src/uci/state_manager.cpp
+)
+target_include_directories(uci PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(uci PUBLIC search)
+
+# Bagatur.cpp-x64 — the UCI engine binary that plugs into chess GUIs.
+# The network bytes are compiled directly into the exe (when the embedded
+# network is available) so it stays self-contained — drop it into
+# cutechess / arena / chessbase without any companion files.
+add_executable(Bagatur.cpp-x64 src/uci/uci_main.cpp)
+target_link_libraries(Bagatur.cpp-x64 PRIVATE uci)
+if (NOT MSVC)
+    target_link_libraries(Bagatur.cpp-x64 PRIVATE pthread)
 endif()
 
-# ------------------------------------------------------------------ network
-# If network_bagatur.nnue is present in the project root, copy it next to
-# the perft_eval/benchmark_eval binaries so they find it without `cd`.
-if (EXISTS "${CMAKE_SOURCE_DIR}/network_bagatur.nnue")
-    foreach(tgt perft_eval benchmark_eval)
-        add_custom_command(TARGET ${tgt} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_SOURCE_DIR}/network_bagatur.nnue"
-                "$<TARGET_FILE_DIR:${tgt}>/network_bagatur.nnue")
-    endforeach()
+if (BAGATUR_HAS_EMBEDDED_NETWORK)
+    # Add the generated TU to the executable's own sources. Avoids the
+    # static-library scan-order issue where the symbols would be discarded
+    # before nnue.cpp's reference is observed. LTO is disabled for this TU —
+    # a 16 MB constant array has nothing to optimize and slows the link.
+    target_sources(Bagatur.cpp-x64 PRIVATE "${BAGATUR_NETWORK_CPP}")
+    set_source_files_properties("${BAGATUR_NETWORK_CPP}"
+        PROPERTIES COMPILE_FLAGS "-fno-lto" SKIP_LINTING ON)
+    target_compile_definitions(Bagatur.cpp-x64 PRIVATE BAGATUR_EMBEDDED_NETWORK=1)
 endif()

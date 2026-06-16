@@ -16,7 +16,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <istream>
 #include <mutex>
+#include <streambuf>
 
 #include "../board/bitboard.h"
 #include "../board/move_util.h"
@@ -40,10 +42,68 @@ namespace {
 std::once_flag        g_network_loaded_flag;
 std::unique_ptr<Network> g_network;
 
+// Pre-loaded buffer pinned by `Network::load_from_memory(...)` before the
+// first `instance()` call. When set, `instance()` uses the embedded blob
+// instead of falling back to the file path.
+const std::uint8_t*   g_embedded_data = nullptr;
+std::size_t           g_embedded_size = 0;
+
 std::string default_network_path() {
-    // network_bagatur.nnue is expected next to the executable, but for a
-    // build directory we also fall back to the project-root copy.
     return "network_bagatur.nnue";
+}
+
+// Read a little-endian int16. `std::istream&` lets the same parser serve
+// `std::ifstream` (file path) and a zero-copy `imemstream` (embedded blob).
+inline std::int16_t read_le_i16(std::istream& f) {
+    std::uint8_t b[2];
+    f.read(reinterpret_cast<char*>(b), 2);
+    return static_cast<std::int16_t>(static_cast<std::uint16_t>(b[0]) |
+                                     (static_cast<std::uint16_t>(b[1]) << 8));
+}
+
+// Zero-copy istream over a contiguous byte buffer. We only need read()
+// support — no putback, no seek beyond range — so the minimal setg() is
+// enough.
+struct imembuf : std::streambuf {
+    imembuf(const std::uint8_t* p, std::size_t n) {
+        char* base = const_cast<char*>(reinterpret_cast<const char*>(p));
+        setg(base, base, base + n);
+    }
+};
+
+void parse(std::istream& f, Network& net,
+           std::vector<std::int16_t>&  l1_weights,
+           std::array<std::int16_t, HIDDEN_SIZE>& l1_biases,
+           std::array<std::array<std::int32_t, HIDDEN_SIZE * 2>, OUTPUT_BUCKETS>& l2_weights_int,
+           std::array<std::int16_t, OUTPUT_BUCKETS>& output_biases) {
+    (void)net;  // unused — accessor by reference for symmetry
+
+    // L1Weights — flat, [feature + bucket * FEATURE_SIZE] indexed.
+    l1_weights.resize(static_cast<std::size_t>(FEATURE_SIZE) *
+                      static_cast<std::size_t>(INPUT_BUCKET_SIZE) *
+                      static_cast<std::size_t>(HIDDEN_SIZE));
+    for (std::size_t i = 0; i < l1_weights.size(); ++i)
+        l1_weights[i] = read_le_i16(f);
+
+    // L1Biases
+    for (int i = 0; i < HIDDEN_SIZE; ++i) l1_biases[i] = read_le_i16(f);
+
+    // L2Weights — interleaved storage in the file:
+    //   for i in 0..HIDDEN_SIZE*2:
+    //     for bucket in 0..OUTPUT_BUCKETS:
+    //       read int16 -> L2Weights[bucket][i]
+    auto l2_short = std::make_unique<std::array<std::array<std::int16_t, HIDDEN_SIZE * 2>, OUTPUT_BUCKETS>>();
+    for (int i = 0; i < HIDDEN_SIZE * 2; ++i)
+        for (int b = 0; b < OUTPUT_BUCKETS; ++b)
+            (*l2_short)[b][i] = read_le_i16(f);
+
+    for (int b = 0; b < OUTPUT_BUCKETS; ++b) output_biases[b] = read_le_i16(f);
+
+    // Widen L2 weights to int32 so the SIMD product code can keep everything
+    // in int32 lanes without sign-extension every iteration.
+    for (int b = 0; b < OUTPUT_BUCKETS; ++b)
+        for (int i = 0; i < HIDDEN_SIZE * 2; ++i)
+            l2_weights_int[b][i] = (*l2_short)[b][i];
 }
 
 }  // anonymous
@@ -51,7 +111,11 @@ std::string default_network_path() {
 const Network& Network::instance() {
     std::call_once(g_network_loaded_flag, [] {
         g_network.reset(new Network());
-        g_network->load(default_network_path());
+        if (g_embedded_data != nullptr) {
+            g_network->load_mem(g_embedded_data, g_embedded_size);
+        } else {
+            g_network->load(default_network_path());
+        }
     });
     return *g_network;
 }
@@ -59,23 +123,21 @@ const Network& Network::instance() {
 void Network::load_from(const std::string& path) {
     auto net = std::unique_ptr<Network>(new Network());
     net->load(path);
-    // Force a single override — this is meant for tests.
     g_network = std::move(net);
 }
 
-namespace {
-
-// Read a little-endian int16 from a streaming file. The Java loader does the
-// equivalent (DataInputStream.readShort returns big-endian; the loader then
-// calls `toLittleEndian` to swap to native LE). On x86 we just read raw.
-inline std::int16_t read_le_i16(std::ifstream& f) {
-    std::uint8_t b[2];
-    f.read(reinterpret_cast<char*>(b), 2);
-    return static_cast<std::int16_t>(static_cast<std::uint16_t>(b[0]) |
-                                     (static_cast<std::uint16_t>(b[1]) << 8));
+// Two roles:
+//   1. Called before any `instance()` call (e.g. from main()): pins the
+//      buffer so the lazy load uses it. The exe stays self-contained.
+//   2. Called after instance() already initialised (tests, late swap):
+//      replaces the live network with the new buffer.
+void Network::load_from_memory(const std::uint8_t* data, std::size_t size) {
+    g_embedded_data = data;
+    g_embedded_size = size;
+    if (g_network) {
+        g_network->load_mem(data, size);
+    }
 }
-
-}  // anonymous
 
 [[noreturn]] static void die(const char* msg, const std::string& path) {
     std::fprintf(stderr, "nnue: %s '%s'\n", msg, path.c_str());
@@ -85,36 +147,15 @@ inline std::int16_t read_le_i16(std::ifstream& f) {
 void Network::load(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) die("cannot open", path);
-
-    // L1Weights — flat, [feature + bucket * FEATURE_SIZE] indexed.
-    l1_weights_.resize(static_cast<std::size_t>(FEATURE_SIZE) *
-                       static_cast<std::size_t>(INPUT_BUCKET_SIZE) *
-                       static_cast<std::size_t>(HIDDEN_SIZE));
-    for (std::size_t i = 0; i < l1_weights_.size(); ++i)
-        l1_weights_[i] = read_le_i16(f);
-
-    // L1Biases
-    for (int i = 0; i < HIDDEN_SIZE; ++i) l1_biases_[i] = read_le_i16(f);
-
-    // L2Weights — interleaved storage in the file:
-    //   for i in 0..HIDDEN_SIZE*2:
-    //     for bucket in 0..OUTPUT_BUCKETS:
-    //       read int16 -> L2Weights[bucket][i]
-    // (Heap-allocated to keep the stack frame small.)
-    auto l2_short = std::make_unique<std::array<std::array<std::int16_t, HIDDEN_SIZE * 2>, OUTPUT_BUCKETS>>();
-    for (int i = 0; i < HIDDEN_SIZE * 2; ++i)
-        for (int b = 0; b < OUTPUT_BUCKETS; ++b)
-            (*l2_short)[b][i] = read_le_i16(f);
-
-    for (int b = 0; b < OUTPUT_BUCKETS; ++b) output_biases_[b] = read_le_i16(f);
-
-    // Widen L2 weights to int32 so the SIMD product code can keep everything
-    // in int32 lanes without sign-extension every iteration.
-    for (int b = 0; b < OUTPUT_BUCKETS; ++b)
-        for (int i = 0; i < HIDDEN_SIZE * 2; ++i)
-            l2_weights_int_[b][i] = (*l2_short)[b][i];
-
+    parse(f, *this, l1_weights_, l1_biases_, l2_weights_int_, output_biases_);
     if (!f.good()) die("short read on", path);
+}
+
+void Network::load_mem(const std::uint8_t* data, std::size_t size) {
+    imembuf buf(data, size);
+    std::istream f(&buf);
+    parse(f, *this, l1_weights_, l1_biases_, l2_weights_int_, output_biases_);
+    if (!f.good()) die("short read on", "<embedded>");
 }
 
 // ----------------------------------------------------------------------------
