@@ -38,22 +38,31 @@ namespace {
 // Locally there is no EDR so the un-throttled output behaves fine, but
 // for Arena/cutechess on managed Windows boxes the throttle is needed.
 struct InfoEmitterState {
-    int    last_depth = -1;
-    double last_emit_secs = -1e9;
+    int    last_depth      = -1;
+    int    last_best_move  = 0;
+    double last_emit_secs  = -1e9;
 };
 InfoEmitterState g_info_state;
 
 constexpr double kMinInfoIntervalSecs = 0.080;  // 80 ms ≈ 12 emissions/sec ceiling
 
 void info_callback(const search::Result& r, void* /*user*/) {
-    bool depth_changed = (r.depth != g_info_state.last_depth);
-    bool is_mate       = (r.score >= search::MATE_THRESHOLD) || (r.score <= -search::MATE_THRESHOLD);
-    bool overdue       = (r.time_secs - g_info_state.last_emit_secs) >= kMinInfoIntervalSecs;
+    int  cur_best   = (r.pv_length > 0) ? r.pv[0] : 0;
 
-    if (!depth_changed && !is_mate && !overdue) return;
+    bool depth_changed      = (r.depth != g_info_state.last_depth);
+    bool best_move_changed  = (cur_best != 0 && cur_best != g_info_state.last_best_move);
+    bool is_mate            = (r.score >= search::MATE_THRESHOLD) || (r.score <= -search::MATE_THRESHOLD);
+    bool overdue            = (r.time_secs - g_info_state.last_emit_secs) >= kMinInfoIntervalSecs;
 
-    g_info_state.last_depth     = r.depth;
-    g_info_state.last_emit_secs = r.time_secs;
+    // CRITICAL: always emit when the chosen move changes, regardless of
+    // throttle. Otherwise the GUI keeps an older PV in its display while
+    // the engine internally migrates `Result::best_move` — we then ship
+    // `bestmove X` to a GUI that's still showing PV starting with Y.
+    if (!depth_changed && !best_move_changed && !is_mate && !overdue) return;
+
+    g_info_state.last_depth      = r.depth;
+    g_info_state.last_best_move  = cur_best;
+    g_info_state.last_emit_secs  = r.time_secs;
 
     const char* bound_suffix = r.lower_bound ? " lowerbound"
                              : r.upper_bound ? " upperbound"
@@ -76,8 +85,9 @@ void info_callback(const search::Result& r, void* /*user*/) {
 }
 
 void reset_info_emitter() {
-    g_info_state.last_depth     = -1;
-    g_info_state.last_emit_secs = -1e9;
+    g_info_state.last_depth      = -1;
+    g_info_state.last_best_move  = 0;
+    g_info_state.last_emit_secs  = -1e9;
 }
 
 }  // namespace
