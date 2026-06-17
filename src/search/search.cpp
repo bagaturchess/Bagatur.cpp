@@ -436,38 +436,41 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     // ----------------------------------------------------------------
     // Move loop. Phases: TT > captures (sorted) > quiets (sorted)
     // ----------------------------------------------------------------
-    int best_score = SCORE_MIN;
-    int best_move  = 0;
-    int move_count = 0;
+    int best_score   = SCORE_MIN;
+    int best_move    = 0;
+
+    // played_count = number of moves *actually played* at this node so far,
+    // BEFORE the current iteration. Mirrors Java's
+    // `movesPerformed_attacks + movesPerformed_quiet` semantics. The
+    // previous code used an enumeration counter that bumped on every
+    // skipped move too — that desynced both the LMP threshold and the
+    // LMR table index by 1+ per pruned move, over-reducing late refute
+    // moves in tactical positions.
+    int played_count = 0;
 
     // ----------------------------------------------------------------
     // Fail-low pruning for non-PV nodes — fires per-move before the
-    // move is actually played. Mirrors the equivalent block in
-    // bagaturchess Search_PVS_NWS.search() lines 1204-1255.
-    //
-    // Skips:
-    //   - LMP   (Late Move Pruning): once we've tried enough moves
-    //   - Futility: static eval too far below alpha to recover
-    //   - SEE: bad captures at shallow depths
+    // move is actually played. Mirrors Search_PVS_NWS.search() line
+    // 1204-1255 / 1410-1434.
     // ----------------------------------------------------------------
     auto should_skip_pre_move = [&](int m, bool is_quiet_move) -> bool {
-        if (is_pv || in_check || move_count <= 1) return false;
+        // Java requires `movesPerformed > 1` for all these prunings → in
+        // our convention, at least 2 already played.
+        if (is_pv || in_check || played_count < 2) return false;
         if (is_mate_score(alpha) || is_mate_score(beta)) return false;
 
         if (is_quiet_move) {
-            // LMP: at high move counts, remaining quiet moves are unlikely to top
-            // the best we already have. `improving` widens the gate.
-            int lmp_count = (3 + depth * depth / (improving ? 1 : 2)) * 3 / 4;  // /PRUNING_AGGR (=1.333)
-            if (move_count >= lmp_count) return true;
+            // LMP (Java line 1221): movesPerformed >= threshold → skip.
+            int lmp_count = (3 + depth * depth / (improving ? 1 : 2)) * 3 / 4;
+            if (played_count >= lmp_count) return true;
 
-            // Futility: skip quiet moves that can't possibly bring static_eval
-            // up to alpha at this depth (≈ 60 cp/ply slack).
+            // Futility (Java line 1229): static eval too low to recover.
             if (depth <= 7) {
                 int futility = depth * 80 * 3 / 4;
                 if (static_eval + futility <= alpha) return true;
             }
         } else {
-            // SEE-pruning for captures with negative static exchange.
+            // SEE pruning for captures (Java's PHASE_ATTACKING_BAD).
             if (depth <= 7) {
                 int see = board::see::getSeeCaptureScore(*cb_, m);
                 int see_thresh = -80 * depth * 3 / 4;
@@ -489,59 +492,47 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         int new_depth = depth - 1 + extension;
         int score;
 
-        // PVS / LMR
-        if (move_count == 1) {
+        // PVS / LMR — `played_count` is the index of THIS move in the
+        // played sequence (0 for first, 1 for second, …), matching Java's
+        // pre-increment `movesPerformed` semantics.
+        if (played_count == 0) {
+            // First played move — full window, propagate parent's is_pv.
             score = -search(ply + 1, new_depth, -beta, -alpha, is_pv, false);
         } else {
             int reduction = 0;
             // Java doLMR gate (Search_PVS_NWS.java line 1301-1307):
-            //   !mateThreat && new_depth >= 2 && !in_check && !isCheckMove
-            //   && move_count > 1 && is_quiet_move
-            // (mate-threat tracking is not implemented; gate omitted.)
-            if (is_quiet_move && new_depth >= 2 && move_count > 1
+            //   `movesPerformed > 1` → at least 2 already played before this one.
+            if (is_quiet_move && new_depth >= 2 && played_count >= 2
                 && !in_check && extension == 0) {
 
                 int rd = std::min(63, new_depth);
-                int rm = std::min(63, move_count);
+                int rm = std::min(63, played_count);
                 double red = kLMR.t[rd][rm];
 
-                // Java LMR modifiers (Search_PVS_NWS.java line 1315-1360).
                 if (!is_pv)              red += 1.0;
                 if (cut_node)            red += 1.0;
                 if (improving)           red -= 1.0;
                 if (not_improving_twice) red += 1.0;
 
-                // History-feedback adjustment — Java line 1330-1335:
-                //   reduction -= 0.5 * (histScore - neutral) / neutral
-                // Our history is centred at zero in [-MAX_VAL, +MAX_VAL]:
-                // strong-history moves get less LMR, poor-history more.
-                // `side` was captured before doMove(); `cb_->colorToMove`
-                // here is the opponent.
+                // History feedback (Java line 1330-1335). `side` is the
+                // mover (captured before doMove flipped colorToMove).
                 int hist = history_.get(side, m);
                 red -= 0.5 * static_cast<double>(hist) / HistoryTable::MAX_VAL;
 
-                // Final clamp: Java does `min(new_depth-1, max(1, red))`.
-                if (red < 1.0)             red = 1.0;
-                if (red > new_depth - 1)   red = new_depth - 1;
+                if (red < 1.0)            red = 1.0;
+                if (red > new_depth - 1)  red = new_depth - 1;
                 reduction = static_cast<int>(red);
             }
             // Null-window reduced search
             score = -search(ply + 1, new_depth - reduction, -alpha - 1, -alpha, false, true);
-            // Re-search if reduced search came back above alpha
+            // Re-search at full depth if the reduced search beat alpha
             if (score > alpha && reduction > 0) {
                 score = -search(ply + 1, new_depth, -alpha - 1, -alpha, false, !cut_node);
             }
-            // PV re-search.
-            //
-            // The classic PVS condition is `score > alpha && score < beta`, but
-            // in MTD(f) alpha = beta-1 → no integer fits in the open interval
-            // → the re-search would never fire. Without it, every non-first
-            // move that beats alpha gets locked into the is_pv=false subtree
-            // (TT/NMP/razor cutoffs leave child PV empty), and the root PV
-            // truncates well before depth. We drop the `score < beta` gate so
-            // the re-search runs at the moment a non-first move overtakes the
-            // current best — propagating is_pv=true down means the chosen
-            // subtree fills its PV stack properly.
+            // PV re-search — drop the classic `score < beta` gate so
+            // MTD(f)'s null window still triggers (alpha = beta-1 leaves
+            // no integer gap). Forwards `is_pv=true` down so the chosen
+            // subtree can fill its PV stack with no TT/NMP/razor cutoffs.
             if (score > alpha && is_pv) {
                 score = -search(ply + 1, new_depth, -beta, -alpha, true, false);
             }
@@ -550,16 +541,15 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         eval_.after_unmake(*cb_, m, side);
         cb_->undoMove(m);
 
-        if (aborted_) return false;  // do not finalise
+        // Count this move as played before deciding on success/failure —
+        // subsequent moves see the updated count for LMR/LMP.
+        ++played_count;
+
+        if (aborted_) return false;
 
         if (score > best_score) {
             best_score = score;
             best_move  = m;
-            // Record the principal variation on every new best move, not just
-            // when alpha is improved. This way null-window searches (alpha =
-            // beta - 1, e.g. MTD(f)) still propagate a "best line so far" up
-            // through the recursion, instead of bottoming out at the first
-            // fail-low parent.
             update_pv(ply, m);
             if (score > alpha) {
                 alpha = score;
@@ -580,7 +570,6 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     // Phase 1: TT move first — never pruned
     if (tt_move != 0 && cb_->isValidMove(tt_move)) {
         bool is_quiet_move = board::mv::is_quiet(tt_move);
-        ++move_count;
         if (try_move(tt_move, is_quiet_move)) goto done;
         if (aborted_) return alpha;
     }
@@ -596,7 +585,6 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         }
         int m = caps[picked];
         if (m == tt_move) continue;
-        ++move_count;
         if (should_skip_pre_move(m, /*is_quiet=*/false)) continue;
         if (try_move(m, /*is_quiet=*/false)) goto done;
         if (aborted_) return alpha;
@@ -611,7 +599,6 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         }
         int m = quiets[picked];
         if (m == tt_move) continue;
-        ++move_count;
         if (should_skip_pre_move(m, /*is_quiet=*/true)) continue;
         if (try_move(m, /*is_quiet=*/true)) goto done;
         if (aborted_) return alpha;
@@ -621,7 +608,7 @@ done:
     if (aborted_) return alpha;
 
     // No legal moves played → mate or stalemate
-    if (move_count == 0) {
+    if (played_count == 0) {
         return in_check ? mated_in(ply) : SCORE_DRAW;
     }
 
