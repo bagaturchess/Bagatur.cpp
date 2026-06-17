@@ -134,10 +134,15 @@ void StateManager::cmd_position(const std::string& line) {
         board_->doMove(m);
     }
 
-    // Board changed → searcher's bound Searcher::cb_ reference is still
-    // valid (we own *board_), but NNUE accumulators need to be refreshed
-    // before the next search. Easiest: rebuild the searcher.
-    searcher_.reset();
+    // Board pointer changed. Re-bind the searcher and refresh NNUE
+    // accumulators, but KEEP the searcher alive — its TT (512 MB) and
+    // eval cache (128 MB) are expensive to allocate and carry useful
+    // info across moves. Dropping them on every `position` command makes
+    // NPS collapse ~10× under a GUI like Arena because every move pays
+    // the 640 MB allocation again and starts from a cold TT.
+    if (searcher_) {
+        searcher_->set_board(*board_);
+    }
 }
 
 void StateManager::cmd_go(const std::string& line) {

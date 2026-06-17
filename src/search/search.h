@@ -81,6 +81,15 @@ public:
     // Request the running search to stop ASAP.
     void stop() noexcept { stop_.store(true, std::memory_order_relaxed); }
 
+    // Re-bind the searcher to a new board (e.g. after a UCI `position`
+    // command replaces the StateManager's board). Refreshes the NNUE
+    // accumulators for the new position but PRESERVES the TT and eval
+    // cache — they carry useful info across moves of a game.
+    void set_board(board::ChessBoard& cb) {
+        cb_ = &cb;
+        eval_.reset(cb);
+    }
+
     TranspositionTable& tt() noexcept { return tt_; }
 
 private:
@@ -110,7 +119,12 @@ private:
     void score_quiet_moves(int ply, int* moves, int* scores, int n);
     int  pick_next_quiet(int* moves, int* scores, int start, int n);
 
-    board::ChessBoard&  cb_;
+    // Non-owning pointer (was a reference; pointer so the StateManager can
+    // re-bind to a fresh ChessBoard after every UCI `position` command
+    // without dropping the searcher — and with it the 512 MB TT and the
+    // 128 MB eval cache, which are expensive to allocate and useful to
+    // carry across moves of a game).
+    board::ChessBoard*  cb_;
     nnue::Evaluator     eval_;
     TranspositionTable  tt_;
     HistoryTable        history_;

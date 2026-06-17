@@ -45,7 +45,7 @@ constexpr int SCORE_BAD_CAP    = -(1 << 28);
 }  // namespace
 
 Searcher::Searcher(board::ChessBoard& cb, std::size_t tt_mb)
-    : cb_(cb), tt_(tt_mb) {
+    : cb_(&cb), tt_(tt_mb) {
     eval_.reset(cb);
 }
 
@@ -66,7 +66,7 @@ bool Searcher::check_for_stop() {
 }
 
 int Searcher::evaluate() {
-    return eval_.evaluate(cb_);
+    return eval_.evaluate(*cb_);
 }
 
 void Searcher::update_pv(int ply, int move) {
@@ -120,8 +120,8 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // call returns instantly (no draw cut), depth bumps without bound, and
     // no `on_iteration` fires because the score never sharpens past the
     // initial seed — so the GUI sees no PV at all.
-    if (cb_.lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
-    if (cb_.getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
+    if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
+    if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
 
     const int alpha_orig = alpha;   // saved for the alpha-restore step at the end
 
@@ -131,7 +131,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // ----------------------------------------------------------------
     int     tt_move  = 0;
     TTEntry tte;
-    if (tt_.probe(cb_.zobristKey, tte)) {
+    if (tt_.probe(cb_->zobristKey, tte)) {
         int tt_score = score_from_tt(tte.score, ply);
         tt_move      = tte.move;
 
@@ -150,7 +150,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     int best_move = 0;
 
     gen_.startPly();
-    gen_.generateAttacks(cb_);
+    gen_.generateAttacks(*cb_);
 
     // Score captures by MVV-LVA inline (no full sort — picks max each iter).
     // Boost the TT move so it's always tried first when present (Java's
@@ -161,7 +161,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     int  n = 0;
     while (gen_.hasNext() && n < 256) {
         int m = gen_.next();
-        if (!cb_.isLegal(m)) continue;
+        if (!cb_->isLegal(m)) continue;
         buf_moves[n]  = m;
         buf_scores[n] = (m == tt_move) ? SCORE_TT_MOVE : score_capture(m);
         ++n;
@@ -180,14 +180,14 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
 
         // SEE pruning — skip captures that lose material on the static exchange.
         // Java line 2079-2084: int see = ...; if (see < 0) continue;
-        if (board::see::getSeeCaptureScore(cb_, m) < 0) continue;
+        if (board::see::getSeeCaptureScore(*cb_, m) < 0) continue;
 
-        int side = cb_.colorToMove;
-        cb_.doMove(m);
-        eval_.after_make(cb_, m, side);
+        int side = cb_->colorToMove;
+        cb_->doMove(m);
+        eval_.after_make(*cb_, m, side);
         int score = -qsearch(ply + 1, -beta, -alpha, is_pv);
-        eval_.after_unmake(cb_, m, side);
-        cb_.undoMove(m);
+        eval_.after_unmake(*cb_, m, side);
+        cb_->undoMove(m);
 
         if (aborted_) return alpha;
 
@@ -219,7 +219,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // ----------------------------------------------------------------
     TTFlag flag = (best >= beta) ? TT_LOWER
                  : (best > alpha_orig ? TT_EXACT : TT_UPPER);
-    tt_.store(cb_.zobristKey, best_move, best, stand, /*depth=*/0, flag, ply);
+    tt_.store(cb_->zobristKey, best_move, best, stand, /*depth=*/0, flag, ply);
 
     return best;
 }
@@ -232,7 +232,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
 //   4. Quiet moves, sorted by butterfly-history
 // ---------------------------------------------------------------------------
 void Searcher::score_quiet_moves(int ply, int* moves, int* scores, int n) {
-    int color   = cb_.colorToMove;
+    int color   = cb_->colorToMove;
     int killer1 = killers_.primary(ply);
     int killer2 = killers_.secondary(ply);
     for (int i = 0; i < n; ++i) {
@@ -265,8 +265,8 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
 
     // Repetition / 50-move — non-PV bails on 2nd visit. See qsearch() above
     // for the full rationale; same convention.
-    if (cb_.lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
-    if (cb_.getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
+    if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
+    if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
 
     // Mate distance pruning.
     int mate_alpha = std::max(alpha, mated_in(ply));
@@ -281,14 +281,14 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     ++nodes_;
     if (ply > sel_depth_) sel_depth_ = ply;
 
-    bool in_check = (cb_.checkingPieces != 0);
+    bool in_check = (cb_->checkingPieces != 0);
     int  alpha_orig = alpha;
 
     // TT probe
     int     tt_move  = 0;
     int     tt_score = SCORE_DRAW;
     TTEntry tte;
-    if (tt_.probe(cb_.zobristKey, tte)) {
+    if (tt_.probe(cb_->zobristKey, tte)) {
         tt_move = tte.move;
         tt_score = score_from_tt(tte.score, ply);
 
@@ -359,11 +359,11 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
                 int    r       = static_cast<int>(r_d);
                 int    nd      = depth - r;
 
-                cb_.doNullMove();
+                cb_->doNullMove();
                 int score = (nd <= 0)
                     ? -qsearch(ply + 1, -beta, -beta + 1, /*is_pv=*/false)
                     : -search(ply + 1, nd, -beta, -beta + 1, /*is_pv=*/false, !cut_node);
-                cb_.undoNullMove();
+                cb_->undoNullMove();
                 if (aborted_) return alpha;
 
                 if (score >= beta) {
@@ -413,11 +413,11 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     int quiets[200],  quiet_scores[200],  n_quiets = 0;
 
     gen_.startPly();
-    gen_.generateMoves(cb_);
-    gen_.generateAttacks(cb_);
+    gen_.generateMoves(*cb_);
+    gen_.generateAttacks(*cb_);
     while (gen_.hasNext()) {
         int m = gen_.next();
-        if (!cb_.isLegal(m)) continue;
+        if (!cb_->isLegal(m)) continue;
         if (board::mv::is_quiet(m)) {
             if (n_quiets < (int)(sizeof(quiets)/sizeof(quiets[0]))) {
                 quiets[n_quiets++] = m;
@@ -469,7 +469,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         } else {
             // SEE-pruning for captures with negative static exchange.
             if (depth <= 7) {
-                int see = board::see::getSeeCaptureScore(cb_, m);
+                int see = board::see::getSeeCaptureScore(*cb_, m);
                 int see_thresh = -80 * depth * 3 / 4;
                 if (see < see_thresh) return true;
             }
@@ -478,13 +478,13 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     };
 
     auto try_move = [&](int m, bool is_quiet_move) -> bool {
-        int side = cb_.colorToMove;
+        int side = cb_->colorToMove;
 
-        cb_.doMove(m);
-        eval_.after_make(cb_, m, side);
+        cb_->doMove(m);
+        eval_.after_make(*cb_, m, side);
 
         // Check extension (cheap proxy: are we now in check?)
-        int extension = (cb_.checkingPieces != 0) ? 1 : 0;
+        int extension = (cb_->checkingPieces != 0) ? 1 : 0;
 
         int new_depth = depth - 1 + extension;
         int score;
@@ -515,7 +515,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
                 //   reduction -= 0.5 * (histScore - neutral) / neutral
                 // Our history is centred at zero in [-MAX_VAL, +MAX_VAL]:
                 // strong-history moves get less LMR, poor-history more.
-                // `side` was captured before doMove(); `cb_.colorToMove`
+                // `side` was captured before doMove(); `cb_->colorToMove`
                 // here is the opponent.
                 int hist = history_.get(side, m);
                 red -= 0.5 * static_cast<double>(hist) / HistoryTable::MAX_VAL;
@@ -547,8 +547,8 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
             }
         }
 
-        eval_.after_unmake(cb_, m, side);
-        cb_.undoMove(m);
+        eval_.after_unmake(*cb_, m, side);
+        cb_->undoMove(m);
 
         if (aborted_) return false;  // do not finalise
 
@@ -567,18 +567,18 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
             if (alpha >= beta) {
                 if (is_quiet_move) {
                     killers_.on_cutoff(ply, m);
-                    history_.on_cutoff(cb_.colorToMove, m, depth);
+                    history_.on_cutoff(cb_->colorToMove, m, depth);
                 }
                 return true;  // beta cutoff
             }
         } else if (is_quiet_move) {
-            history_.on_poor(cb_.colorToMove, m, depth);
+            history_.on_poor(cb_->colorToMove, m, depth);
         }
         return false;
     };
 
     // Phase 1: TT move first — never pruned
-    if (tt_move != 0 && cb_.isValidMove(tt_move)) {
+    if (tt_move != 0 && cb_->isValidMove(tt_move)) {
         bool is_quiet_move = board::mv::is_quiet(tt_move);
         ++move_count;
         if (try_move(tt_move, is_quiet_move)) goto done;
@@ -628,7 +628,7 @@ done:
     // TT store
     TTFlag flag = (best_score >= beta) ? TT_LOWER
                  : (best_score > alpha_orig ? TT_EXACT : TT_UPPER);
-    tt_.store(cb_.zobristKey, best_move, best_score, static_eval, depth, flag, ply);
+    tt_.store(cb_->zobristKey, best_move, best_score, static_eval, depth, flag, ply);
     return best_score;
 }
 
@@ -653,7 +653,7 @@ Result Searcher::goPVS(const Limits& lim) {
     start_      = std::chrono::steady_clock::now();
     tt_.new_search();
     killers_.clear();
-    eval_.reset(cb_);
+    eval_.reset(*cb_);
 
     Result best{};
     int alpha = SCORE_MIN, beta = SCORE_MAX;
@@ -712,11 +712,11 @@ Result Searcher::goMTD(const Limits& lim) {
     start_      = std::chrono::steady_clock::now();
     tt_.new_search();
     killers_.clear();
-    eval_.reset(cb_);
+    eval_.reset(*cb_);
 
     // Initial seed value — full static eval at the root. Same scale as what
     // search() returns (side-to-move PoV in negamax).
-    int initial_val = eval_.evaluate(cb_);
+    int initial_val = eval_.evaluate(*cb_);
 
     MTDSearchManager mgr(/*start_depth=*/1, /*max_iterations=*/lim.max_depth, initial_val);
 
