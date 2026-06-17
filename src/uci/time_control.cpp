@@ -43,10 +43,14 @@ double per_move_budget_ms(TCType type, const Go& go, int colour) noexcept {
             return std::max(1.0, mt - std::min(50.0, mt * 0.05));
         }
         case TCType::TOURNAMENT: {
-            // Java TimeController_Tournament uses time/movestogo (Tournament.java).
-            int mtg = std::max(1, go.movestogo);
-            // Distribute most of the remaining clock across the moves.
-            return std::max(1.0, clock / mtg + inc);
+            // TimeController_Tournament.java overrides getTotalClockTime_DevideFactor()
+            // to return `movestogo + 1` (line 48). The +1 reserves a small buffer
+            // for the last move so we don't burn the entire remaining clock on
+            // move N exactly. `inc` is 0 here — Java reaches INCREMENT_PER_MOVE
+            // first when `winc > 0`, so the `+ inc` is harmless symbolism.
+            int    mtg     = std::max(1, go.movestogo);
+            double base    = clock / static_cast<double>(mtg + 1);
+            return std::max(1.0, base + inc);
         }
         case TCType::INCREMENT_PER_MOVE: {
             // 1:1 port of TimeController_FloatingTime.setupMinMoveTimeAndTotalClockTime():
@@ -73,14 +77,25 @@ double per_move_budget_ms(TCType type, const Go& go, int colour) noexcept {
             return std::max(1.0, min_move_time);
         }
         case TCType::SUDDEN_DEATH: {
-            // FloatingTime / SuddenDeath:
+            // 1:1 port of TimeController_FloatingTime / SuddenDeath:
             //   totalClockTime = clock / emergency_factor(clock)
-            //   minMoveTime    ≈ clock / (35 × emergency_factor)
-            //   availableTime  = minMoveTime + totalClockTime × 0.125
+            //   minMoveTime    = clock / (35 × emergency_factor)
+            //   availableTime  = minMoveTime + totalClockTime × usage%
+            //
+            // Java's `usage%` starts at 0 and grows up to 0.125 (the value
+            // `getMoveEvallDiff_MaxTotalTimeUsagePercent()` returns for
+            // SuddenDeath) only when the search becomes score-volatile.
+            // Previously we used the MAX directly → 1 min sudden death
+            // gave 8.4 s/move at the start, flagging the engine in ~7
+            // moves. The dynamic component isn't ported, so the safe
+            // approximation is to fall back to minMoveTime as the fixed
+            // budget — the emergency factor still kicks in as the clock
+            // drains, keeping the engine from running out: at 15 s left
+            // emergency ≈ 1.5 → 285 ms/move, at 5 s ≈ 2.5 → 57 ms/move.
             double emergency  = sudden_death_emergency_factor(clock);
-            double total      = clock / emergency;
             double min_move   = clock / (BAGATUR_DIVIDE_FACTOR_DEFAULT * emergency);
-            double available  = min_move + total * 0.125;   // SuddenDeath.java line 110
+            double total      = clock / emergency;
+            double available  = min_move;
             return std::clamp(available, 1.0, total);
         }
         default:
