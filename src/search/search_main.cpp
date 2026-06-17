@@ -71,8 +71,14 @@ int run(int argc, char** argv) {
     auto sr = std::make_unique<Searcher>(*cb, /*tt_mb=*/512);
 
     Limits lim;
-    lim.max_depth     = depth;
-    lim.max_time_secs = time_secs;
+    lim.max_depth = depth;
+    if (time_secs > 0.0) {
+        // CLI driver: collapse to a fixed-budget run — min == total so the
+        // dynamic component stays zero.
+        lim.min_move_secs    = time_secs;
+        lim.total_clock_secs = time_secs;
+        lim.max_usage_percent = 0.0;
+    }
 
     // Per-iteration printer — UCI-flavoured "info" line on every completed depth.
     lim.on_iteration  = [](const Result& r, void* /*user*/) {

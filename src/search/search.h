@@ -39,7 +39,25 @@ struct Result;  // fwd
 struct Limits {
     int            max_depth     = MAX_PLY - 1;
     std::uint64_t  max_nodes     = 0;             // 0 = unlimited
-    double         max_time_secs = 0.0;           // 0 = unlimited
+
+    // Dynamic time budget — 1:1 with Java's
+    // TimeController_FloatingTime / MoveEvalInAccount /
+    // ConsumedTimeVSRemainingTimeInAccount.
+    //   available_time = min_move_secs + total_clock_secs × usage_pct_dyn
+    //   usage_pct_dyn starts at 0, grows toward `max_usage_percent` as
+    //   per-iteration eval/best-move volatility builds up.
+    //
+    // Iteration-boundary terminate gate (Java newIteration()):
+    //   stop next iteration iff
+    //     elapsed >= min_move_secs AND
+    //     elapsed >  consumed_vs_remaining × available_time
+    //
+    // For FIXED_DEPTH / FIXED_NODES / INFINITE leave `min_move_secs = 0` to
+    // disable the time machinery.
+    double         min_move_secs           = 0.0;
+    double         total_clock_secs        = 0.0;
+    double         max_usage_percent       = 0.0;
+    double         consumed_vs_remaining   = 0.50;
 
     // Root-search algorithm. When `true`, runs MTD(f) γ-stepping over null
     // windows. When `false`, runs the classic PVS iterative-deepening loop.
@@ -158,10 +176,37 @@ private:
     int                                 root_depth_= 0;
     int                                 sel_depth_ = 0;
     std::chrono::steady_clock::time_point start_;
-    double                              max_time_s_= 0.0;
     std::uint64_t                       max_nodes_ = 0;
     std::atomic<bool>                   stop_{false};
     bool                                aborted_   = false;
+
+    // --- Dynamic time budget (Java MoveEvalInAccount +
+    //     ConsumedTimeVSRemainingTimeInAccount, mirror of) ---
+    // Set once per `go()` from the Limits passed in.
+    double  min_move_secs_         = 0.0;
+    double  total_clock_secs_      = 0.0;
+    double  max_usage_percent_     = 0.0;
+    double  consumed_vs_remaining_ = 0.50;
+
+    // Per-iteration tracking — Java MoveEvalInAccount fields. Reset on
+    // every `go()`.
+    int     vol_last_eval_       = 0;
+    int     vol_last_move_       = 0;
+    int     vol_last_depth_      = 0;
+    double  vol_accum_score_diff_= 0.0;
+    double  vol_usage_pct_       = 0.0;     // dynamic component, [0, max_usage_percent_]
+    bool    terminate_search_    = false;   // set by iteration-boundary check
+
+    // Mirror of MoveEvalInAccount.newPVLine() — called after each MTD
+    // iteration that emitted a fresh `eval/best_move/depth`. Updates the
+    // dynamic usage percent so that available_time can grow on volatile
+    // searches.
+    void update_volatility(int eval, int move, int depth) noexcept;
+
+    // Current dynamic available time = min_move + total × usage_pct.
+    double available_secs() const noexcept {
+        return min_move_secs_ + total_clock_secs_ * vol_usage_pct_;
+    }
 };
 
 }  // namespace search

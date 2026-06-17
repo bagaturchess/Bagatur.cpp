@@ -51,10 +51,46 @@ Searcher::Searcher(board::ChessBoard& cb, std::size_t tt_mb)
 
 bool Searcher::time_up() noexcept {
     if (max_nodes_ != 0 && nodes_ >= max_nodes_) return true;
-    if (max_time_s_ <= 0.0) return false;
+    // `min_move_secs_ == 0` is the "no time limit" sentinel used by
+    // INFINITE / FIXED_DEPTH / FIXED_NODES.
+    if (min_move_secs_ <= 0.0) return false;
+    if (terminate_search_)     return true;
     auto now = std::chrono::steady_clock::now();
     double s = std::chrono::duration<double>(now - start_).count();
-    return s >= max_time_s_;
+    if (s >= total_clock_secs_)       return true;   // hard cap (Java's clock ceiling)
+    if (s >= available_secs())        return true;   // soft, grows with volatility
+    return false;
+}
+
+void Searcher::update_volatility(int eval, int move, int depth) noexcept {
+    // 1:1 port of MoveEvalInAccount.newPVLine() (line 60-86).
+    // Constants from the Java source:
+    static constexpr double SCORES_DIFF_DEVIDER       = 2.0;
+    static constexpr int    SCORES_PENALTY_DIFF_MOVES = 50;
+    static constexpr int    MAX_SCORES_DIFF           = 150;
+
+    // Java skips the volatility accumulation when a mate has been found —
+    // we don't want to keep burning clock once mate is known.
+    if (is_mate_score(eval)) return;
+
+    if (vol_last_move_ != 0) {
+        int cur_diff = std::abs(vol_last_eval_ - eval);
+        if (vol_last_depth_ != depth) {
+            // Decay on new depth — old volatility shrinks.
+            vol_accum_score_diff_ /= SCORES_DIFF_DEVIDER;
+        }
+        vol_accum_score_diff_ += cur_diff;
+        if (vol_last_move_ != move) {
+            vol_accum_score_diff_ += SCORES_PENALTY_DIFF_MOVES;
+        }
+        double clamped = std::min(static_cast<double>(MAX_SCORES_DIFF),
+                                  vol_accum_score_diff_);
+        vol_usage_pct_ = max_usage_percent_ * (clamped / MAX_SCORES_DIFF);
+    }
+
+    vol_last_move_  = move;
+    vol_last_eval_  = eval;
+    vol_last_depth_ = depth;
 }
 
 bool Searcher::check_for_stop() {
@@ -899,8 +935,17 @@ Result Searcher::goPVS(const Limits& lim) {
     sel_depth_  = 0;
     aborted_    = false;
     stop_.store(false, std::memory_order_relaxed);
-    max_time_s_ = lim.max_time_secs;
     max_nodes_  = lim.max_nodes;
+    min_move_secs_         = lim.min_move_secs;
+    total_clock_secs_      = lim.total_clock_secs;
+    max_usage_percent_     = lim.max_usage_percent;
+    consumed_vs_remaining_ = lim.consumed_vs_remaining;
+    vol_last_eval_         = 0;
+    vol_last_move_         = 0;
+    vol_last_depth_        = 0;
+    vol_accum_score_diff_  = 0.0;
+    vol_usage_pct_         = 0.0;
+    terminate_search_      = false;
     start_      = std::chrono::steady_clock::now();
     tt_.new_search();
     killers_.clear();
@@ -932,6 +977,18 @@ Result Searcher::goPVS(const Limits& lim) {
 
         if (lim.on_iteration) lim.on_iteration(best, lim.callback_user);
 
+        // Volatility update — same mechanism as goMTD.
+        update_volatility(score, best.best_move, depth);
+
+        if (min_move_secs_ > 0.0) {
+            auto t_now = std::chrono::steady_clock::now();
+            double tillNow = std::chrono::duration<double>(t_now - start_).count();
+            if (tillNow >= min_move_secs_ &&
+                tillNow >  consumed_vs_remaining_ * available_secs()) {
+                terminate_search_ = true;
+            }
+        }
+
         if (time_up() || stop_.load(std::memory_order_relaxed)) break;
         if (is_mate_score(score)) break;  // already mated, no point going deeper
     }
@@ -958,8 +1015,17 @@ Result Searcher::goMTD(const Limits& lim) {
     sel_depth_  = 0;
     aborted_    = false;
     stop_.store(false, std::memory_order_relaxed);
-    max_time_s_ = lim.max_time_secs;
     max_nodes_  = lim.max_nodes;
+    min_move_secs_         = lim.min_move_secs;
+    total_clock_secs_      = lim.total_clock_secs;
+    max_usage_percent_     = lim.max_usage_percent;
+    consumed_vs_remaining_ = lim.consumed_vs_remaining;
+    vol_last_eval_         = 0;
+    vol_last_move_         = 0;
+    vol_last_depth_        = 0;
+    vol_accum_score_diff_  = 0.0;
+    vol_usage_pct_         = 0.0;
+    terminate_search_      = false;
     start_      = std::chrono::steady_clock::now();
     tt_.new_search();
     killers_.clear();
@@ -1057,6 +1123,27 @@ Result Searcher::goMTD(const Limits& lim) {
             best.seldepth = sel_depth_;
 
             if (lim.on_iteration) lim.on_iteration(best, lim.callback_user);
+
+            // Volatility update mirrors Java MoveEvalInAccount.newPVLine().
+            // Use `best.best_move` (the LOWERBOUND-committed move) instead
+            // of `eval`-iteration's possibly-upper-bound move so we track
+            // genuine "best move switched" events, not transient bounds.
+            update_volatility(eval, best.best_move, depth);
+        }
+
+        // Iteration-boundary terminate gate — Java newIteration() in
+        // ConsumedTimeVSRemainingTimeInAccount line 56-58:
+        //   terminate = (tillNow >= minMoveTime &&
+        //                tillNow >  consumedVsRemaining × availableTime)
+        // Once set, time_up() will return true for the rest of the search
+        // and the next iteration won't start.
+        if (min_move_secs_ > 0.0) {
+            auto now = std::chrono::steady_clock::now();
+            double tillNow = std::chrono::duration<double>(now - start_).count();
+            if (tillNow >= min_move_secs_ &&
+                tillNow >  consumed_vs_remaining_ * available_secs()) {
+                terminate_search_ = true;
+            }
         }
 
         if (time_up() || stop_.load(std::memory_order_relaxed)) break;

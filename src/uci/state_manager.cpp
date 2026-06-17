@@ -201,9 +201,15 @@ void StateManager::cmd_go(const std::string& line) {
     lim.on_iteration  = info_callback;
     lim.callback_user = nullptr;
 
-    if (budget.depth_limit > 0)        lim.max_depth     = budget.depth_limit;
-    if (budget.node_limit  > 0)        lim.max_nodes     = static_cast<std::uint64_t>(budget.node_limit);
-    if (budget.move_time_secs > 0.0)   lim.max_time_secs = budget.move_time_secs;
+    if (budget.depth_limit > 0)  lim.max_depth = budget.depth_limit;
+    if (budget.node_limit  > 0)  lim.max_nodes = static_cast<std::uint64_t>(budget.node_limit);
+    // Dynamic time budget (Java MoveEvalInAccount + ConsumedTimeVSRemaining).
+    // All four fields are 0 for INFINITE / FIXED_DEPTH / FIXED_NODES — the
+    // searcher treats `min_move_secs == 0` as "no time cap".
+    lim.min_move_secs         = budget.min_move_secs;
+    lim.total_clock_secs      = budget.total_clock_secs;
+    lim.max_usage_percent     = budget.max_usage_percent;
+    lim.consumed_vs_remaining = budget.consumed_vs_remaining;
 
     search_running_.store(true, std::memory_order_relaxed);
     search_thread_ = std::thread([this, lim]() {

@@ -21,11 +21,27 @@ double sudden_death_emergency_factor(double time_ms) noexcept {
     return f < 1.0 ? 1.0 : f;
 }
 
-// Compute the per-move budget in milliseconds from the white/black clock
-// shape that the FloatingTime / SuddenDeath / IncrementPerMove / Tournament
-// chain produces. We collapse all of them onto a single budget for the
-// driver — full fidelity tracking is not needed for cutechess.
-double per_move_budget_ms(TCType type, const Go& go, int colour) noexcept {
+// Per-TC `max_usage_percent` — taken from each Java time-controller's
+// `TimeConfig` (`getMoveEvallDiff_MaxTotalTimeUsagePercent()`).
+double max_usage_for(TCType type) noexcept {
+    switch (type) {
+        case TCType::SUDDEN_DEATH:        return 0.125;  // TimeConfig_SuddenDeath line 110
+        case TCType::INCREMENT_PER_MOVE:  return 0.20;   // FloatingTime/MoveEvalInAccount default
+        case TCType::TOURNAMENT:          return 0.20;
+        default:                          return 0.0;    // fixed: no dynamic expansion
+    }
+}
+
+// Components for the dynamic-budget model:
+//   - min_move_ms = guaranteed search time (Java's `minMoveTime`)
+//   - total_ms    = absolute clock ceiling for this move (Java's `totalClockTime`)
+//
+// Returned by reference; callers fill the rest of TimeBudget.
+//
+// For TIME_PER_MOVE: min == total == movetime so the dynamic component
+// stays zero and we behave like a fixed budget.
+void per_move_budget_components(TCType type, const Go& go, int colour,
+                                double& min_move_ms, double& total_ms) noexcept {
     bool is_white = (colour == 0);
     double clock_ms = static_cast<double>(is_white ? go.wtime : go.btime);
     double inc_ms   = static_cast<double>(is_white ? go.winc  : go.binc);
@@ -38,68 +54,43 @@ double per_move_budget_ms(TCType type, const Go& go, int colour) noexcept {
 
     switch (type) {
         case TCType::TIME_PER_MOVE: {
-            // Use raw movetime with a small safety margin.
             double mt = static_cast<double>(go.movetime);
-            return std::max(1.0, mt - std::min(50.0, mt * 0.05));
+            double budget = std::max(1.0, mt - std::min(50.0, mt * 0.05));
+            min_move_ms = budget;
+            total_ms    = budget;       // hard cap == budget; no expansion
+            return;
         }
         case TCType::TOURNAMENT: {
-            // TimeController_Tournament.java overrides getTotalClockTime_DevideFactor()
-            // to return `movestogo + 1` (line 48). The +1 reserves a small buffer
-            // for the last move so we don't burn the entire remaining clock on
-            // move N exactly. `inc` is 0 here — Java reaches INCREMENT_PER_MOVE
-            // first when `winc > 0`, so the `+ inc` is harmless symbolism.
-            int    mtg     = std::max(1, go.movestogo);
-            double base    = clock / static_cast<double>(mtg + 1);
-            return std::max(1.0, base + inc);
+            int    mtg  = std::max(1, go.movestogo);
+            double base = clock / static_cast<double>(mtg + 1);
+            min_move_ms = std::max(1.0, base + inc);
+            total_ms    = clock;        // whole clock segment for these `movestogo` moves
+            return;
         }
         case TCType::INCREMENT_PER_MOVE: {
-            // 1:1 port of TimeController_FloatingTime.setupMinMoveTimeAndTotalClockTime():
-            //   totalClockTime = clock / emergency             (emergency = 1 for FloatingTime)
-            //   if totalClockTime >= 35 * inc → minMoveTime = max(clock/35, inc)
-            //   else                          → minMoveTime = min(clock/35, inc)
-            //
-            // Earlier the code did `clock/35 + inc`, which adds `inc` on TOP of
-            // the per-move slice — at 1 min + 1 sec the budget came out to
-            // 2.47 s per move (vs Java's 1.57 s), so the engine bled ~1.5 s
-            // every move and flagged around move 35.
-            //
-            // The dynamic moveeval-diff component (up to 20% of totalClockTime,
-            // grown during the search) is not implemented here — using
-            // minMoveTime as a fixed budget is the safe approximation: never
-            // overspends the clock, may leave some time on quiet positions.
+            // FloatingTime.setupMinMoveTimeAndTotalClockTime() — emergency=1.
             double base = clock / BAGATUR_DIVIDE_FACTOR_DEFAULT;
-            double min_move_time;
             if (clock >= BAGATUR_DIVIDE_FACTOR_DEFAULT * inc) {
-                min_move_time = std::max(base, inc);
+                min_move_ms = std::max(base, inc);
             } else {
-                min_move_time = std::min(base, inc);
+                min_move_ms = std::min(base, inc);
             }
-            return std::max(1.0, min_move_time);
+            min_move_ms = std::max(1.0, min_move_ms);
+            total_ms    = clock;        // Java's `totalClockTime` for floating-time
+            return;
         }
         case TCType::SUDDEN_DEATH: {
-            // 1:1 port of TimeController_FloatingTime / SuddenDeath:
-            //   totalClockTime = clock / emergency_factor(clock)
-            //   minMoveTime    = clock / (35 × emergency_factor)
-            //   availableTime  = minMoveTime + totalClockTime × usage%
-            //
-            // Java's `usage%` starts at 0 and grows up to 0.125 (the value
-            // `getMoveEvallDiff_MaxTotalTimeUsagePercent()` returns for
-            // SuddenDeath) only when the search becomes score-volatile.
-            // Previously we used the MAX directly → 1 min sudden death
-            // gave 8.4 s/move at the start, flagging the engine in ~7
-            // moves. The dynamic component isn't ported, so the safe
-            // approximation is to fall back to minMoveTime as the fixed
-            // budget — the emergency factor still kicks in as the clock
-            // drains, keeping the engine from running out: at 15 s left
-            // emergency ≈ 1.5 → 285 ms/move, at 5 s ≈ 2.5 → 57 ms/move.
-            double emergency  = sudden_death_emergency_factor(clock);
-            double min_move   = clock / (BAGATUR_DIVIDE_FACTOR_DEFAULT * emergency);
-            double total      = clock / emergency;
-            double available  = min_move;
-            return std::clamp(available, 1.0, total);
+            double emergency = sudden_death_emergency_factor(clock);
+            double base      = clock / (BAGATUR_DIVIDE_FACTOR_DEFAULT * emergency);
+            double total     = clock / emergency;
+            min_move_ms = std::max(1.0, base);
+            total_ms    = std::max(min_move_ms, total);
+            return;
         }
         default:
-            return 0.0;
+            min_move_ms = 0.0;
+            total_ms    = 0.0;
+            return;
     }
 }
 
@@ -136,9 +127,16 @@ TimeBudget compute(const Go& go, int colour_to_move) noexcept {
         case TCType::TIME_PER_MOVE:
         case TCType::INCREMENT_PER_MOVE:
         case TCType::TOURNAMENT:
-        case TCType::SUDDEN_DEATH:
-            b.move_time_secs = per_move_budget_ms(b.type, go, colour_to_move) / 1000.0;
+        case TCType::SUDDEN_DEATH: {
+            double min_move_ms = 0.0, total_ms = 0.0;
+            per_move_budget_components(b.type, go, colour_to_move,
+                                      min_move_ms, total_ms);
+            b.min_move_secs         = min_move_ms / 1000.0;
+            b.total_clock_secs      = total_ms    / 1000.0;
+            b.max_usage_percent     = max_usage_for(b.type);
+            // `consumed_vs_remaining` keeps its 0.50 default from the struct.
             break;
+        }
     }
     return b;
 }
