@@ -21,15 +21,40 @@ namespace uci {
 namespace {
 
 // Per-iteration info callback — runs on the search thread and prints UCI
-// "info" lines directly to stdout. Atomic flush after each line keeps GUIs
-// like cutechess responsive.
+// "info" lines directly to stdout.
 //
 // Mirrors Java SearchInfoUtils.buildMajorInfoCommand():
 //   * append `lowerbound` / `upperbound` after the score
 //   * skip the `pv` segment when the score is an upper bound (the best move
 //     from a failed-low MTD probe is "the one that failed least" — printing
 //     it as PV misleads the GUI).
+//
+// Rate-limit: emit at most once per ~80 ms unless the depth changes or a
+// mate score is found. MTD bumps depth quickly at the shallow phase and
+// the raw callback rate hit ~150 emissions/second early on. When a GUI
+// runs under a kernel-level EDR (corporate AV, CrowdStrike, etc.) every
+// stdout flush goes through a scan callback — at that volume the engine
+// thread spends most of its time blocked on WriteFile and NPS collapses.
+// Locally there is no EDR so the un-throttled output behaves fine, but
+// for Arena/cutechess on managed Windows boxes the throttle is needed.
+struct InfoEmitterState {
+    int    last_depth = -1;
+    double last_emit_secs = -1e9;
+};
+InfoEmitterState g_info_state;
+
+constexpr double kMinInfoIntervalSecs = 0.080;  // 80 ms ≈ 12 emissions/sec ceiling
+
 void info_callback(const search::Result& r, void* /*user*/) {
+    bool depth_changed = (r.depth != g_info_state.last_depth);
+    bool is_mate       = (r.score >= search::MATE_THRESHOLD) || (r.score <= -search::MATE_THRESHOLD);
+    bool overdue       = (r.time_secs - g_info_state.last_emit_secs) >= kMinInfoIntervalSecs;
+
+    if (!depth_changed && !is_mate && !overdue) return;
+
+    g_info_state.last_depth     = r.depth;
+    g_info_state.last_emit_secs = r.time_secs;
+
     const char* bound_suffix = r.lower_bound ? " lowerbound"
                              : r.upper_bound ? " upperbound"
                                              : "";
@@ -48,6 +73,11 @@ void info_callback(const search::Result& r, void* /*user*/) {
     }
     std::printf("\n");
     std::fflush(stdout);
+}
+
+void reset_info_emitter() {
+    g_info_state.last_depth     = -1;
+    g_info_state.last_emit_secs = -1e9;
 }
 
 }  // namespace
@@ -148,6 +178,7 @@ void StateManager::cmd_position(const std::string& line) {
 void StateManager::cmd_go(const std::string& line) {
     stop_and_join_search();
     ensure_searcher();
+    reset_info_emitter();   // every `go` starts a fresh emission cadence
 
     Go go = Go::parse(line);
     int colour_to_move = board_->colorToMove;
