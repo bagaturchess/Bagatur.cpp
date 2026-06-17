@@ -322,46 +322,72 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         && stacks_[ply - 2].static_eval <= stacks_[ply - 4].static_eval;
 
     // ----------------------------------------------------------------
-    // Pruning at non-PV nodes
+    // Pruning at non-PV nodes — Java Search_PVS_NWS.java lines 714-834
+    //
+    // Constants and divisor `PRUNING_AGGRESSIVENESS = 1.333` (≈ * 3/4)
+    // are taken from Search_PVS_NWS. The volatility-history term is
+    // skipped (we don't track it); equivalent to volatility = 0.
     // ----------------------------------------------------------------
     if (!is_pv && !in_check && !is_mate_score(alpha) && !is_mate_score(beta)) {
 
         // ------------------------------------------------------------
-        // Fail-high pruning for non-PV nodes — fires when the static
-        // eval is comfortably above beta and the position therefore
-        // "looks won" already.
+        // Fail-high pruning — `static_eval >= beta + 35` gate matches
+        // Java's reverse-futility eligibility check.
         // ------------------------------------------------------------
         if (static_eval >= beta + 35) {
 
-            // Static null move (reverse futility)
-            if (depth <= 7 && static_eval - 80 * depth >= beta) {
-                return static_eval;
+            // Static null move pruning — Java line 718-737.
+            //   margin = depth * 80 - (improving ? 70 : 0)
+            //   cut if static_eval - margin/1.333 >= beta
+            //   return (2*beta + static_eval) / 3   (soft lower bound)
+            if (depth <= 7) {
+                int snm_margin = (depth * 80 - (improving ? 70 : 0)) * 3 / 4;
+                if (static_eval - snm_margin >= beta) {
+                    return (2 * beta + static_eval) / 3;
+                }
             }
 
-            // Null move pruning
+            // Verified null move pruning — Java line 740-799.
+            //   r = max(1.5, depth/3 + 3 + min(3, max(0, static_eval-beta)/80)) * 1.555
+            //   probe with `[beta-1, beta]` at ply+1
+            //   if probe fails high, VERIFY at same ply, [beta-1, beta], depth-r
+            //   only cut when both pass — prevents NMP zugzwang artifacts
             if (depth >= 3) {
-                int r = 3 + depth / 4 + std::min(3, (static_eval - beta) / 80);
+                double r_raw   = depth / 3.0 + 3.0
+                               + std::min(3.0, std::max(0, static_eval - beta) / 80.0);
+                double r_d     = std::max(1.5, r_raw) * 1.555;
+                int    r       = static_cast<int>(r_d);
+                int    nd      = depth - r;
+
                 cb_.doNullMove();
-                int score = -search(ply + 1, depth - r, -beta, -beta + 1, false, !cut_node);
+                int score = (nd <= 0)
+                    ? -qsearch(ply + 1, -beta, -beta + 1, /*is_pv=*/false)
+                    : -search(ply + 1, nd, -beta, -beta + 1, /*is_pv=*/false, !cut_node);
                 cb_.undoNullMove();
                 if (aborted_) return alpha;
+
                 if (score >= beta) {
-                    if (is_mate_score(score)) score = beta;  // don't return false mate
-                    return score;
+                    // Verification — same ply, same window, reduced depth.
+                    int verify = (nd <= 0)
+                        ?  qsearch(ply, beta - 1, beta, /*is_pv=*/false)
+                        :  search(ply, nd, beta - 1, beta, /*is_pv=*/false, /*cut_node=*/true);
+                    if (aborted_) return alpha;
+
+                    if (verify >= beta) {
+                        if (is_mate_score(verify)) verify = beta;
+                        return verify;
+                    }
                 }
             }
         }
 
         // ------------------------------------------------------------
-        // Fail-low pruning for non-PV nodes — fires when the static
-        // eval is below alpha and the position therefore "looks lost"
-        // unless a tactical resource flips it.
+        // Fail-low pruning — razoring with Java's scaled margin.
+        //   margin = RAZORING_MARGIN(260) * depth / 1.333
         // ------------------------------------------------------------
         if (static_eval <= alpha) {
-
-            // Razoring — confirm the fail-low with a shallow qsearch.
             if (depth <= 4) {
-                int razor_margin = 260 * depth;
+                int razor_margin = 260 * depth * 3 / 4;
                 if (static_eval + razor_margin < alpha) {
                     int v = qsearch(ply, alpha, alpha + 1, /*is_pv=*/false);
                     if (v < alpha) return v;
@@ -468,23 +494,36 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
             score = -search(ply + 1, new_depth, -beta, -alpha, is_pv, false);
         } else {
             int reduction = 0;
-            if (is_quiet_move && depth >= 3 && move_count > 1 && !in_check && extension == 0) {
-                int rd = std::min(63, depth);
+            // Java doLMR gate (Search_PVS_NWS.java line 1301-1307):
+            //   !mateThreat && new_depth >= 2 && !in_check && !isCheckMove
+            //   && move_count > 1 && is_quiet_move
+            // (mate-threat tracking is not implemented; gate omitted.)
+            if (is_quiet_move && new_depth >= 2 && move_count > 1
+                && !in_check && extension == 0) {
+
+                int rd = std::min(63, new_depth);
                 int rm = std::min(63, move_count);
-                reduction = (int)kLMR.t[rd][rm];
+                double red = kLMR.t[rd][rm];
 
-                // Mirror Search_PVS_NWS LMR adjustments:
-                //   if (!isPv)             reduction += 1;
-                //   if (cutNode)           reduction += 1;
-                //   if (notImprovingTwice) reduction += 1;   // CNIR
-                // (non-PV nodes, expected-fail-high nodes, and deteriorating-
-                //  position branches all get reduced more aggressively)
-                if (!is_pv)              reduction += 1;
-                if (cut_node)            reduction += 1;
-                if (not_improving_twice) reduction += 1;
+                // Java LMR modifiers (Search_PVS_NWS.java line 1315-1360).
+                if (!is_pv)              red += 1.0;
+                if (cut_node)            red += 1.0;
+                if (improving)           red -= 1.0;
+                if (not_improving_twice) red += 1.0;
 
-                if (reduction >= new_depth) reduction = new_depth - 1;
-                if (reduction < 0) reduction = 0;
+                // History-feedback adjustment — Java line 1330-1335:
+                //   reduction -= 0.5 * (histScore - neutral) / neutral
+                // Our history is centred at zero in [-MAX_VAL, +MAX_VAL]:
+                // strong-history moves get less LMR, poor-history more.
+                // `side` was captured before doMove(); `cb_.colorToMove`
+                // here is the opponent.
+                int hist = history_.get(side, m);
+                red -= 0.5 * static_cast<double>(hist) / HistoryTable::MAX_VAL;
+
+                // Final clamp: Java does `min(new_depth-1, max(1, red))`.
+                if (red < 1.0)             red = 1.0;
+                if (red > new_depth - 1)   red = new_depth - 1;
+                reduction = static_cast<int>(red);
             }
             // Null-window reduced search
             score = -search(ply + 1, new_depth - reduction, -alpha - 1, -alpha, false, true);
