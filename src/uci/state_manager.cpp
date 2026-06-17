@@ -38,9 +38,10 @@ namespace {
 // Locally there is no EDR so the un-throttled output behaves fine, but
 // for Arena/cutechess on managed Windows boxes the throttle is needed.
 struct InfoEmitterState {
-    int    last_depth      = -1;
-    int    last_best_move  = 0;
-    double last_emit_secs  = -1e9;
+    int    last_depth          = -1;
+    int    last_best_move      = 0;
+    double last_emit_secs      = -1e9;
+    bool   pv_emitted_at_depth = false;   // any non-upperbound emit at current depth?
 };
 InfoEmitterState g_info_state;
 
@@ -54,15 +55,30 @@ void info_callback(const search::Result& r, void* /*user*/) {
     bool is_mate            = (r.score >= search::MATE_THRESHOLD) || (r.score <= -search::MATE_THRESHOLD);
     bool overdue            = (r.time_secs - g_info_state.last_emit_secs) >= kMinInfoIntervalSecs;
 
+    // Bound flag — see search::Result. lowerbound/exact carry PV; upperbound
+    // omits it (per Java SearchInfoUtils convention).
+    bool has_pv             = !r.upper_bound;
+
+    // MTD often produces alternating upperbound (fail-low) and lowerbound
+    // (fail-high) iterations at the same depth. The 80 ms throttle was
+    // suppressing the second one, so depths that started with upperbound
+    // never got a PV-bearing info line — the GUI was left with no PV for
+    // every other depth ("info depth N skipped" symptom). Force-emit the
+    // first PV-bearing iteration at each depth, regardless of throttle.
+    if (depth_changed) g_info_state.pv_emitted_at_depth = false;
+    bool needs_first_pv_at_depth = has_pv && !g_info_state.pv_emitted_at_depth;
+
     // CRITICAL: always emit when the chosen move changes, regardless of
     // throttle. Otherwise the GUI keeps an older PV in its display while
     // the engine internally migrates `Result::best_move` — we then ship
     // `bestmove X` to a GUI that's still showing PV starting with Y.
-    if (!depth_changed && !best_move_changed && !is_mate && !overdue) return;
+    if (!depth_changed && !best_move_changed && !is_mate
+        && !overdue && !needs_first_pv_at_depth) return;
 
     g_info_state.last_depth      = r.depth;
     g_info_state.last_best_move  = cur_best;
     g_info_state.last_emit_secs  = r.time_secs;
+    if (has_pv) g_info_state.pv_emitted_at_depth = true;
 
     const char* bound_suffix = r.lower_bound ? " lowerbound"
                              : r.upper_bound ? " upperbound"
@@ -85,9 +101,10 @@ void info_callback(const search::Result& r, void* /*user*/) {
 }
 
 void reset_info_emitter() {
-    g_info_state.last_depth      = -1;
-    g_info_state.last_best_move  = 0;
-    g_info_state.last_emit_secs  = -1e9;
+    g_info_state.last_depth          = -1;
+    g_info_state.last_best_move      = 0;
+    g_info_state.last_emit_secs      = -1e9;
+    g_info_state.pv_emitted_at_depth = false;
 }
 
 }  // namespace
