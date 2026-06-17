@@ -133,12 +133,13 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // position had a different repetition / 50-move context carry stale
     // draw scores. Skip the cutoff but keep the TT move for ordering.
     // ----------------------------------------------------------------
-    // Restrict to repetition only — the 50-move counter changes monotonically
-    // during search, but deep mate-lines in piece-heavy endgames (e.g. KRR vs
-    // K) push the counter past 50 before mate is found, and disabling TT
-    // cutoffs there blows the recursion budget. Repetition alone is the
-    // hot symptom for the reported game-state-stale-TT bug.
-    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 1);
+    // `getRepetition()` counts the current visit too: 1 = first occurrence,
+    // 2 = second occurrence (a transposition back to this position has just
+    // happened), 3 = FIDE three-fold. We disable TT cutoff at 2+ visits —
+    // a stored entry from the *first* visit could not see the draw lines
+    // that become forcible on the *second* visit, so its score is stale.
+    // TT move is still pulled for ordering; only the cutoff is suppressed.
+    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 2);
 
     int     tt_move  = 0;
     TTEntry tte;
@@ -316,12 +317,13 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     //
     // Mitigation: still pull the TT *move* for ordering, but don't take
     // the cutoff when the current game-state could shift the true score.
-    // Restrict to repetition only — the 50-move counter changes monotonically
-    // during search, but deep mate-lines in piece-heavy endgames (e.g. KRR vs
-    // K) push the counter past 50 before mate is found, and disabling TT
-    // cutoffs there blows the recursion budget. Repetition alone is the
-    // hot symptom for the reported game-state-stale-TT bug.
-    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 1);
+    // `getRepetition()` counts the current visit too: 1 = first occurrence,
+    // 2 = second occurrence (a transposition back to this position has just
+    // happened), 3 = FIDE three-fold. We disable TT cutoff at 2+ visits —
+    // a stored entry from the *first* visit could not see the draw lines
+    // that become forcible on the *second* visit, so its score is stale.
+    // TT move is still pulled for ordering; only the cutoff is suppressed.
+    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 2);
 
     int     tt_move  = 0;
     int     tt_score = SCORE_DRAW;
@@ -1028,9 +1030,19 @@ Result Searcher::goMTD(const Limits& lim) {
         if (advanced) {
             Stack& s = stacks_[1];
             if (s.pv_length > 0) {
-                best.best_move = s.pv[0];
-                std::memcpy(best.pv.data(), s.pv, s.pv_length * sizeof(int));
-                best.pv_length = s.pv_length;
+                // CRITICAL — only commit best_move/pv on a LOWERBOUND
+                // (fail-high) advance. Upperbound (fail-low) advances
+                // suppress the PV in the UCI line (per Java's convention),
+                // so committing them silently desyncs the bestmove sent at
+                // the end from the last PV the GUI saw — that is exactly
+                // the "engine shows draw PV but plays losing move" symptom.
+                // Always allow the very first commit (so `bestmove 0000`
+                // is never sent on very short searches).
+                if (is_lower || best.best_move == 0) {
+                    best.best_move = s.pv[0];
+                    std::memcpy(best.pv.data(), s.pv, s.pv_length * sizeof(int));
+                    best.pv_length = s.pv_length;
+                }
             }
             best.score       = eval;
             best.lower_bound = is_lower;
