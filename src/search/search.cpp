@@ -128,14 +128,25 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // ----------------------------------------------------------------
     // TT probe (Java qsearch lines 1928-1978). Reused for both the
     // cutoff (non-PV nodes only) and to bias move ordering by TT move.
+    //
+    // Same near-draw safeguard as in search() — entries written when the
+    // position had a different repetition / 50-move context carry stale
+    // draw scores. Skip the cutoff but keep the TT move for ordering.
     // ----------------------------------------------------------------
+    // Restrict to repetition only — the 50-move counter changes monotonically
+    // during search, but deep mate-lines in piece-heavy endgames (e.g. KRR vs
+    // K) push the counter past 50 before mate is found, and disabling TT
+    // cutoffs there blows the recursion budget. Repetition alone is the
+    // hot symptom for the reported game-state-stale-TT bug.
+    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 1);
+
     int     tt_move  = 0;
     TTEntry tte;
     if (tt_.probe(cb_->zobristKey, tte)) {
         int tt_score = score_from_tt(tte.score, ply);
         tt_move      = tte.move;
 
-        if (!is_pv) {
+        if (!is_pv && !tt_score_unreliable_for_cutoff) {
             if (tte.flag == TT_EXACT) return tt_score;
             if (tte.flag == TT_LOWER && tt_score >= beta)  return tt_score;
             if (tte.flag == TT_UPPER && tt_score <= alpha) return tt_score;
@@ -252,8 +263,11 @@ int Searcher::pick_next_quiet(int* /*moves*/, int* scores, int start, int n) {
 
 // ---------------------------------------------------------------------------
 // search — main negamax routine. ply >= 1 (root is run by go()).
+// `use_sme` gates singular-move extension recursion: `singular_move_search`
+// passes false down so we never SME inside SME (1:1 with Java).
 // ---------------------------------------------------------------------------
-int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool cut_node) {
+int Searcher::search(int ply, int depth, int alpha, int beta,
+                     bool is_pv, bool cut_node, bool use_sme) {
     stacks_[ply].pv_length = 0;
 
     if (check_for_stop()) {
@@ -284,20 +298,52 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
     bool in_check = (cb_->checkingPieces != 0);
     int  alpha_orig = alpha;
 
-    // TT probe
+    // TT probe.
+    //
+    // The zobrist key captures only the piece layout + side-to-move +
+    // castling + EP. It does NOT include the repetition count or the
+    // 50-move counter — but the *search score* in the entry implicitly
+    // depends on both (draw scores propagate up through the tree).
+    //
+    // When the *current* position has any repetition history or is close
+    // to the 50-move rule, an entry stored during a *previous* visit was
+    // computed under a different game-state context — its score may be
+    // wildly wrong (e.g. the engine saw +50 cp on the first visit but
+    // the second visit makes a 3-fold draw forcible, so the true score
+    // is 0). Cutting on such an entry locks in the stale score and the
+    // engine refuses to take the draw — exactly the symptom that crops
+    // up after several moves of a game and not from a cold `position fen`.
+    //
+    // Mitigation: still pull the TT *move* for ordering, but don't take
+    // the cutoff when the current game-state could shift the true score.
+    // Restrict to repetition only — the 50-move counter changes monotonically
+    // during search, but deep mate-lines in piece-heavy endgames (e.g. KRR vs
+    // K) push the counter past 50 before mate is found, and disabling TT
+    // cutoffs there blows the recursion budget. Repetition alone is the
+    // hot symptom for the reported game-state-stale-TT bug.
+    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 1);
+
     int     tt_move  = 0;
     int     tt_score = SCORE_DRAW;
+    int     tt_depth = -1;
+    TTFlag  tt_flag  = TT_NONE;
     TTEntry tte;
     if (tt_.probe(cb_->zobristKey, tte)) {
-        tt_move = tte.move;
+        tt_move  = tte.move;
         tt_score = score_from_tt(tte.score, ply);
+        tt_depth = tte.depth;
+        tt_flag  = static_cast<TTFlag>(tte.flag);
 
-        if (!is_pv && tte.depth >= depth) {
-            if (tte.flag == TT_EXACT) return tt_score;
-            if (tte.flag == TT_LOWER && tt_score >= beta)  return tt_score;
-            if (tte.flag == TT_UPPER && tt_score <= alpha) return tt_score;
+        if (!is_pv && tt_depth >= depth && !tt_score_unreliable_for_cutoff) {
+            if (tt_flag == TT_EXACT) return tt_score;
+            if (tt_flag == TT_LOWER && tt_score >= beta)  return tt_score;
+            if (tt_flag == TT_UPPER && tt_score <= alpha) return tt_score;
         }
     }
+
+    // SME gates (Search_PVS_NWS.java line 570-571).
+    bool tt_is_lower_or_exact         = (tt_flag == TT_LOWER) || (tt_flag == TT_EXACT);
+    bool tt_depth_enough_for_singular = tt_depth >= depth - 3;
 
     Stack& st = stacks_[ply];
     // SCORE_MIN serves as the "no static eval available" sentinel — set when
@@ -362,7 +408,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
                 cb_->doNullMove();
                 int score = (nd <= 0)
                     ? -qsearch(ply + 1, -beta, -beta + 1, /*is_pv=*/false)
-                    : -search(ply + 1, nd, -beta, -beta + 1, /*is_pv=*/false, !cut_node);
+                    : -search(ply + 1, nd, -beta, -beta + 1, /*is_pv=*/false, !cut_node, use_sme);
                 cb_->undoNullMove();
                 if (aborted_) return alpha;
 
@@ -370,7 +416,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
                     // Verification — same ply, same window, reduced depth.
                     int verify = (nd <= 0)
                         ?  qsearch(ply, beta - 1, beta, /*is_pv=*/false)
-                        :  search(ply, nd, beta - 1, beta, /*is_pv=*/false, /*cut_node=*/true);
+                        :  search(ply, nd, beta - 1, beta, /*is_pv=*/false, /*cut_node=*/true, use_sme);
                     if (aborted_) return alpha;
 
                     if (verify >= beta) {
@@ -393,6 +439,62 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
                     if (v < alpha) return v;
                 }
             }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Singular-move extension + multi-cut — Java Search_PVS_NWS.java
+    // line 927-992. Test whether the TT move is uniquely good at this
+    // position. If yes, extend it. If a multi-cut is detected (≥2 moves
+    // beat β at reduced depth), cut immediately.
+    //
+    // `tt_move_extension` semantics (Java line 1276):
+    //    +2  → double extension (alternatives much weaker than TT move)
+    //    +1  → single extension (TT move is singular)
+    //     0  → no extension (SME not triggered)
+    //    -2  → multi-cut hint: TT move not singular, search it shallower
+    // ----------------------------------------------------------------
+    int tt_move_extension = 0;
+    if (use_sme
+        && !in_check
+        && depth >= 6
+        && ply < MAX_PLY / 2                    // keep room for extensions
+        && !is_mate_score(alpha)
+        && !is_mate_score(beta)
+        && tt_is_lower_or_exact
+        && !is_mate_score(tt_score)             // avoid singular-margin math on mate scores
+        && !tt_score_unreliable_for_cutoff      // tt_score may be stale near draw → SME would lie too
+        && tt_depth_enough_for_singular
+        && tt_move != 0
+        && cb_->isValidMove(tt_move)) {
+
+        int singular_margin = is_pv ? (depth * depth / 12)
+                                    : (126 * depth / 55);
+        int singular_beta   = tt_score - singular_margin;
+        int singular_depth  = std::max(1, (depth - 1) / 2);
+
+        int singular_value = singular_move_search(
+            ply, singular_depth,
+            singular_beta - 1, singular_beta,
+            tt_move, cut_node);
+
+        if (aborted_) return alpha;
+
+        if (singular_value < singular_beta) {
+            // TT move is singular — extend
+            if (singular_value < singular_beta - singular_margin) {
+                tt_move_extension = 2;   // double extension
+            } else {
+                tt_move_extension = 1;
+            }
+        } else if (!is_pv) {
+            // Multi-cut: an alternative also beats β
+            if (singular_value > beta
+                && !is_mate_score(alpha)
+                && !is_mate_score(beta)) {
+                return singular_value;
+            }
+            tt_move_extension = -2;      // demote TT move depth
         }
     }
 
@@ -480,14 +582,24 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         return false;
     };
 
-    auto try_move = [&](int m, bool is_quiet_move) -> bool {
+    // `forced_extension` is meaningful only for the TT move: it carries
+    // the SME result (-2 / 0 / +1 / +2). Mirrors Java line 1273-1277
+    // where TT move's new_depth uses tt_move_extension exclusively,
+    // bypassing the check-extension branch.
+    auto try_move = [&](int m, bool is_quiet_move, bool is_tt_move = false,
+                        int forced_extension = 0) -> bool {
         int side = cb_->colorToMove;
 
         cb_->doMove(m);
         eval_.after_make(*cb_, m, side);
 
-        // Check extension (cheap proxy: are we now in check?)
-        int extension = (cb_->checkingPieces != 0) ? 1 : 0;
+        int extension;
+        if (is_tt_move) {
+            extension = forced_extension;
+        } else {
+            // Check extension (cheap proxy: are we now in check?)
+            extension = (cb_->checkingPieces != 0) ? 1 : 0;
+        }
 
         int new_depth = depth - 1 + extension;
         int score;
@@ -497,7 +609,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         // pre-increment `movesPerformed` semantics.
         if (played_count == 0) {
             // First played move — full window, propagate parent's is_pv.
-            score = -search(ply + 1, new_depth, -beta, -alpha, is_pv, false);
+            score = -search(ply + 1, new_depth, -beta, -alpha, is_pv, false, use_sme);
         } else {
             int reduction = 0;
             // Java doLMR gate (Search_PVS_NWS.java line 1301-1307):
@@ -524,17 +636,17 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
                 reduction = static_cast<int>(red);
             }
             // Null-window reduced search
-            score = -search(ply + 1, new_depth - reduction, -alpha - 1, -alpha, false, true);
+            score = -search(ply + 1, new_depth - reduction, -alpha - 1, -alpha, false, true, use_sme);
             // Re-search at full depth if the reduced search beat alpha
             if (score > alpha && reduction > 0) {
-                score = -search(ply + 1, new_depth, -alpha - 1, -alpha, false, !cut_node);
+                score = -search(ply + 1, new_depth, -alpha - 1, -alpha, false, !cut_node, use_sme);
             }
             // PV re-search — drop the classic `score < beta` gate so
             // MTD(f)'s null window still triggers (alpha = beta-1 leaves
             // no integer gap). Forwards `is_pv=true` down so the chosen
             // subtree can fill its PV stack with no TT/NMP/razor cutoffs.
             if (score > alpha && is_pv) {
-                score = -search(ply + 1, new_depth, -beta, -alpha, true, false);
+                score = -search(ply + 1, new_depth, -beta, -alpha, true, false, use_sme);
             }
         }
 
@@ -567,10 +679,11 @@ int Searcher::search(int ply, int depth, int alpha, int beta, bool is_pv, bool c
         return false;
     };
 
-    // Phase 1: TT move first — never pruned
+    // Phase 1: TT move first — never pruned, depth carries SME extension.
     if (tt_move != 0 && cb_->isValidMove(tt_move)) {
         bool is_quiet_move = board::mv::is_quiet(tt_move);
-        if (try_move(tt_move, is_quiet_move)) goto done;
+        if (try_move(tt_move, is_quiet_move,
+                     /*is_tt_move=*/true, tt_move_extension)) goto done;
         if (aborted_) return alpha;
     }
 
@@ -616,6 +729,155 @@ done:
     TTFlag flag = (best_score >= beta) ? TT_LOWER
                  : (best_score > alpha_orig ? TT_EXACT : TT_UPPER);
     tt_.store(cb_->zobristKey, best_move, best_score, static_eval, depth, flag, ply);
+    return best_score;
+}
+
+// ---------------------------------------------------------------------------
+// singular_move_search — Java private singular_move_search() (line 1616).
+//
+// Searches all moves EXCEPT `tt_move_excl` with a null window at reduced
+// depth. Returns the best score among alternatives. Used by the SME block
+// in `search()` to decide if the TT move is uniquely good (extend it) or
+// if multiple moves beat β (multi-cut).
+//
+// The TT lookup uses a *perturbed* hash key (xor with rotated tt_move
+// scrambled bits) so we never collide with the parent node's TT entry —
+// otherwise we'd just return tt_score and learn nothing about the
+// singularity of tt_move.
+//
+// Quiet-move limit: only the first `1 + depth/2` non-check quiet moves
+// are considered. Captures, promotions and check-givers are always tried.
+// ---------------------------------------------------------------------------
+int Searcher::singular_move_search(int ply, int depth, int alpha, int beta,
+                                   int tt_move_excl, bool cut_node) {
+    // Perturbed hash — mirrors Java line 1622:
+    //   hashkey ^ Long.rotateLeft(((long) ttMove1) * 0x9E3779B97F4A7C15L, 32)
+    auto rotl64 = [](std::uint64_t x, int n) noexcept {
+        return (x << n) | (x >> (64 - n));
+    };
+    std::uint64_t scrambled = static_cast<std::uint64_t>(tt_move_excl)
+                              * 0x9E3779B97F4A7C15ULL;
+    std::uint64_t hashkey   = cb_->zobristKey ^ rotl64(scrambled, 32);
+
+    // TT probe with the perturbed key
+    TTEntry tte;
+    if (tt_.probe(hashkey, tte)) {
+        if (tte.depth >= depth) {
+            int tts = score_from_tt(tte.score, ply);
+            if (tte.flag == TT_EXACT)                      return tts;
+            if (tte.flag == TT_LOWER && tts >= beta)       return tts;
+            if (tte.flag == TT_UPPER && tts <= alpha)      return tts;
+        }
+    }
+
+    const int alpha_orig = alpha;
+
+    // Generate every move at this position
+    int caps[64],    cap_scores[64],    n_caps   = 0;
+    int quiets[200], quiet_scores[200], n_quiets = 0;
+
+    gen_.startPly();
+    gen_.generateMoves(*cb_);
+    gen_.generateAttacks(*cb_);
+    while (gen_.hasNext()) {
+        int m = gen_.next();
+        if (!cb_->isLegal(m)) continue;
+        if (m == tt_move_excl) continue;     // skip the excluded TT move
+        if (board::mv::is_quiet(m)) {
+            if (n_quiets < (int)(sizeof(quiets) / sizeof(quiets[0])))
+                quiets[n_quiets++] = m;
+        } else {
+            if (n_caps < (int)(sizeof(caps) / sizeof(caps[0])))
+                caps[n_caps++] = m;
+        }
+    }
+    gen_.endPly();
+
+    for (int i = 0; i < n_caps;   ++i) cap_scores[i] = score_capture(caps[i]);
+    score_quiet_moves(ply, quiets, quiet_scores, n_quiets);
+
+    const int quiet_limit = 1 + depth / 2;
+    int       quiet_noncheck_played = 0;
+    int       best_score = SCORE_MIN;
+    int       best_move  = 0;
+
+    auto try_alt = [&](int m, bool is_quiet_move) -> bool {
+        int side = cb_->colorToMove;
+        cb_->doMove(m);
+        eval_.after_make(*cb_, m, side);
+
+        bool gives_check = (cb_->checkingPieces != 0);
+
+        // Quiet-move limit (Java line 1837-1845): cap the number of quiet
+        // non-check moves we explore. Captures, promotions and checks are
+        // always searched.
+        bool skip = false;
+        if (is_quiet_move && !gives_check) {
+            ++quiet_noncheck_played;
+            if (quiet_noncheck_played > quiet_limit) skip = true;
+        }
+
+        int score = SCORE_MIN;
+        if (!skip) {
+            // Nested SME is disabled — pass use_sme=false.
+            score = -search(ply + 1, depth - 1, -beta, -alpha,
+                            /*is_pv=*/false, cut_node, /*use_sme=*/false);
+        }
+
+        eval_.after_unmake(*cb_, m, side);
+        cb_->undoMove(m);
+
+        if (aborted_) return false;
+        if (skip) return false;
+
+        if (score > best_score) {
+            best_score = score;
+            best_move  = m;
+        }
+        if (score > alpha) {
+            alpha = score;
+            if (alpha >= beta) return true;   // β cutoff
+        }
+        return false;
+    };
+
+    // Captures sorted by MVV-LVA
+    for (int picked = 0; picked < n_caps; ++picked) {
+        int best_i = picked;
+        for (int j = picked + 1; j < n_caps; ++j)
+            if (cap_scores[j] > cap_scores[best_i]) best_i = j;
+        if (best_i != picked) {
+            std::swap(caps[picked],       caps[best_i]);
+            std::swap(cap_scores[picked], cap_scores[best_i]);
+        }
+        if (try_alt(caps[picked], /*is_quiet=*/false)) goto sm_done;
+        if (aborted_) return alpha;
+    }
+
+    // Quiets sorted by killer + history
+    for (int picked = 0; picked < n_quiets; ++picked) {
+        int best_i = pick_next_quiet(quiets, quiet_scores, picked, n_quiets);
+        if (best_i != picked) {
+            std::swap(quiets[picked],       quiets[best_i]);
+            std::swap(quiet_scores[picked], quiet_scores[best_i]);
+        }
+        if (try_alt(quiets[picked], /*is_quiet=*/true)) goto sm_done;
+        if (aborted_) return alpha;
+    }
+
+sm_done:
+    if (aborted_) return alpha;
+
+    // Store in the perturbed TT slot so subsequent SME calls at this node
+    // hit the cached result.
+    if (best_move != 0) {
+        TTFlag f = (best_score >= beta)       ? TT_LOWER
+                 : (best_score > alpha_orig)  ? TT_EXACT
+                                              : TT_UPPER;
+        tt_.store(hashkey, best_move, best_score, /*eval=*/0,
+                  depth, f, ply);
+    }
+
     return best_score;
 }
 

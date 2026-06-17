@@ -107,8 +107,19 @@ private:
     Result goMTD(const Limits& lim);   // MTD(f) γ-stepping
 
     // Core recursive routines.
-    int search(int ply, int depth, int alpha, int beta, bool is_pv, bool cut_node);
+    int search(int ply, int depth, int alpha, int beta,
+               bool is_pv, bool cut_node, bool use_sme = true);
     int qsearch(int ply, int alpha, int beta, bool is_pv);
+
+    // Singular-move verification — Java private singular_move_search().
+    // Returns the best score among all moves OTHER than `tt_move_excl`,
+    // searched at a reduced depth with a perturbed hash so we never hit
+    // the parent TT entry. Caller compares the result to `singular_beta`:
+    //   < singular_beta              → TT move is singular, extend it
+    //   ≥ singular_beta && > β       → multi-cut: ≥2 moves beat β, cut now
+    //   ≥ singular_beta              → no extension (demote TT move)
+    int singular_move_search(int ply, int depth, int alpha, int beta,
+                             int tt_move_excl, bool cut_node);
 
     // Helpers
     int  evaluate();
