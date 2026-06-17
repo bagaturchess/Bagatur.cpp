@@ -64,6 +64,41 @@ BB ChessBoard::checkingPiecesByPiece(int sourcePieceIndex) const noexcept {
     }
 }
 
+// FIDE insufficient-material draw test — 1:1 port of
+// BoardImpl.hasSufficientMatingMaterial(int color). See chess_board.h for the
+// per-condition spec.
+bool ChessBoard::hasSufficientMatingMaterial(int color) const noexcept {
+    // Light/dark-square masks in the H1=0 file-reversed indexing used by the
+    // Java port:
+    //   light = ((sq >> 3) + (sq & 7)) is even
+    // → rank 1 light-bits 0,2,4,6 = 0x55; rank 2 light-bits 9,11,13,15 = 0xAA.
+    constexpr BB LIGHT_SQUARES = 0x55AA55AA55AA55AAULL;
+    constexpr BB DARK_SQUARES  = ~LIGHT_SQUARES;
+
+    if (pieces[color][PAWN]  != 0) return true;
+    if (pieces[color][QUEEN] != 0) return true;
+    if (pieces[color][ROOK]  != 0) return true;
+
+    const BB bishops = pieces[color][BISHOP];
+    const BB knights = pieces[color][NIGHT];
+
+    if (popcount(bishops) + popcount(knights) >= 3) return true;
+
+    if (bishops != 0 &&
+        (bishops & LIGHT_SQUARES) != 0 &&
+        (bishops & DARK_SQUARES)  != 0) {
+        return true;
+    }
+
+    if (popcount(bishops) == 1 && popcount(knights) == 1) return true;
+
+    return false;
+}
+
+bool ChessBoard::hasSufficientMatingMaterial() const noexcept {
+    return hasSufficientMatingMaterial(WHITE) || hasSufficientMatingMaterial(BLACK);
+}
+
 void ChessBoard::setPinnedAndDiscoPieces() noexcept {
     pinnedPieces     = 0;
     discoveredPieces = 0;

@@ -108,6 +108,22 @@ public:
         return v == RepetitionTable::NO_VALUE ? 0 : v;
     }
 
+    // FIDE insufficient-material draw test — mirrors BoardImpl.java.
+    //
+    // A position is a draw by insufficient material iff NEITHER side has the
+    // material to force mate. Per-color test returns true if THAT side could
+    // (in principle) mate a bare king:
+    //   - any pawn, queen, or rook                           → true
+    //   - ≥ 3 minor pieces (bishop + knight count)           → true
+    //   - bishops on BOTH square colors                      → true
+    //   - exactly 1 bishop AND 1 knight                      → true
+    //   - otherwise (lone king / K+N / K+B / KN+KN, etc.)    → false
+    //
+    // The KN+KN case is technically winnable with perfect play but cannot be
+    // FORCED — FIDE treats it as drawn material; Java does too.
+    bool hasSufficientMatingMaterial() const noexcept;
+    bool hasSufficientMatingMaterial(int color) const noexcept;
+
     // One-time initialisation of all lookup tables (magic, zobrist, etc.).
     // Idempotent and thread-safe to call multiple times.
     static void initGlobals();

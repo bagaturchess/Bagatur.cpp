@@ -148,7 +148,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     }
     if (ply >= MAX_PLY) return evaluate();
 
-    // Repetition / 50-move — mirrors SearchImpl.isDraw():
+    // Repetition / 50-move / insufficient material — mirrors SearchImpl.isDraw():
     //   non-PV: 2nd occurrence is enough (a side that can force a repeat
     //           can drive towards the actual 3-fold; bound the score now).
     //   PV:     wait for the real 3-fold so we don't print a phantom PV.
@@ -158,6 +158,12 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // initial seed — so the GUI sees no PV at all.
     if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
     if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
+    // `ply > 1` — never short-circuit at root: even in a true insufficient-
+    // material draw the engine must still emit a legal move (UCI forbids
+    // `bestmove 0000` in a non-terminal position). At root we let the search
+    // pick some legal move; at deeper plies the cut prevents drawn-endgame
+    // spin in the MTD(f) loop.
+    if (ply > 1 && !cb_->hasSufficientMatingMaterial()) return SCORE_DRAW;
 
     const int alpha_orig = alpha;   // saved for the alpha-restore step at the end
 
@@ -314,10 +320,13 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
 
     if (ply >= MAX_PLY) return evaluate();
 
-    // Repetition / 50-move — non-PV bails on 2nd visit. See qsearch() above
-    // for the full rationale; same convention.
+    // Repetition / 50-move / insufficient material — non-PV bails on 2nd visit.
+    // See qsearch() above for the full rationale; same convention.
     if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
     if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
+    // See material-check note in search() — guarded by `ply > 1` so the root
+    // never short-circuits without a legal move to ship.
+    if (ply > 1 && !cb_->hasSufficientMatingMaterial()) return SCORE_DRAW;
 
     // Mate distance pruning.
     int mate_alpha = std::max(alpha, mated_in(ply));
