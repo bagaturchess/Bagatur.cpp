@@ -26,7 +26,7 @@ that would each be its own multi-thousand-line port.
 | Late-move reductions             | `LMR_TABLE` + reduction formula        |
 | Internal iterative reduction     | "Reduce depth if TT value is not presented" |
 | Check extension                  | per-move extension on giving-check     |
-| Move ordering: TT > caps > kil > hist | `PHASE_TT..PHASE_QUIET` loop       |
+| Move ordering: TT > good-cap > kill > quiet > bad-cap | `PHASE_TT..PHASE_ATTACKING_BAD` loop |
 | Butterfly history                | `IHistoryTable` (registerGood/Bad)     |
 | Killers (2/ply)                  | `env.getKillers()`                     |
 | Dynamic time budget              | `TimeController_FloatingTime` + `MoveEvalInAccount` + `ConsumedTimeVSRemainingTimeInAccount` |

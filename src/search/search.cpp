@@ -279,11 +279,14 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
 }
 
 // ---------------------------------------------------------------------------
-// Move ordering for the main loop. We pull moves in phases:
-//   1. TT move (if legal at this position)
-//   2. Captures + promotions, sorted by MVV-LVA
-//   3. Killers (2)
-//   4. Quiet moves, sorted by butterfly-history
+// Quiet-move scoring used by `singular_move_search()`. SME does NOT use the
+// phase split (TT/good/killer/quiet/bad), so killers are boosted to the top
+// of the quiet list here so they're picked first.
+//
+// The main `search()` loop pulls killers as their own phases and scores quiets
+// inline by history alone — see Java Search_PVS_NWS PHASE_* convention:
+//   PHASE_TT > PHASE_ATTACKING_GOOD > PHASE_KILLER_1 > PHASE_KILLER_2
+//     > PHASE_QUIET > PHASE_ATTACKING_BAD
 // ---------------------------------------------------------------------------
 void Searcher::score_quiet_moves(int ply, int* moves, int* scores, int n) {
     int color   = cb_->colorToMove;
@@ -452,6 +455,9 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
                 int    r       = static_cast<int>(r_d);
                 int    nd      = depth - r;
 
+                // Null-move marker for the child's prev_move: 0 = no
+                // parent move (continuation history skipped at ply+1).
+                stacks_[ply].current_move = 0;
                 cb_->doNullMove();
                 int score = (nd <= 0)
                     ? -qsearch(ply + 1, -beta, -beta + 1, /*is_pv=*/false)
@@ -557,9 +563,21 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
 
     // ----------------------------------------------------------------
     // Collect & order moves
+    //
+    // Buckets follow Java's Search_PVS_NWS PHASE_* groups:
+    //   good_caps = PHASE_ATTACKING_GOOD (captures/promotions, SEE >= 0)
+    //   bad_caps  = PHASE_ATTACKING_BAD  (captures/promotions, SEE <  0)
+    //   quiets    = PHASE_QUIET          (non-capture non-promotion)
+    //
+    // SEE is computed once per capture during the split. Java's phase loop
+    // re-generates captures per phase and recomputes SEE on filter; we
+    // collapse that into a single pass and cache `see` alongside bad caps
+    // so the PHASE_ATTACKING_BAD pruning threshold (Java line 1247) uses
+    // the precomputed value.
     // ----------------------------------------------------------------
-    int caps[64],     cap_scores[64],     n_caps = 0;
-    int quiets[200],  quiet_scores[200],  n_quiets = 0;
+    int good_caps[64];   int good_cap_scores[64];                            int n_good_caps = 0;
+    int bad_caps[64];    int bad_cap_scores[64];    int bad_cap_sees[64];    int n_bad_caps  = 0;
+    int quiets[200];     int quiet_scores[200];                              int n_quiets    = 0;
 
     gen_.startPly();
     gen_.generateMoves(*cb_);
@@ -572,18 +590,51 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
                 quiets[n_quiets++] = m;
             }
         } else {
-            if (n_caps < (int)(sizeof(caps)/sizeof(caps[0]))) {
-                caps[n_caps++] = m;
+            int see = board::see::getSeeCaptureScore(*cb_, m);
+            if (see >= 0) {
+                if (n_good_caps < (int)(sizeof(good_caps)/sizeof(good_caps[0]))) {
+                    good_caps[n_good_caps]       = m;
+                    good_cap_scores[n_good_caps] = score_capture(m);
+                    ++n_good_caps;
+                }
+            } else {
+                if (n_bad_caps < (int)(sizeof(bad_caps)/sizeof(bad_caps[0]))) {
+                    bad_caps[n_bad_caps]       = m;
+                    bad_cap_scores[n_bad_caps] = score_capture(m);
+                    bad_cap_sees[n_bad_caps]   = see;
+                    ++n_bad_caps;
+                }
             }
         }
     }
     gen_.endPly();
 
-    for (int i = 0; i < n_caps; ++i) cap_scores[i] = score_capture(caps[i]);
-    score_quiet_moves(ply, quiets, quiet_scores, n_quiets);
+    // Quiet scoring: butterfly history + 1-ply continuation. Killers are
+    // tried in their own phases (PHASE_KILLER_1 / PHASE_KILLER_2) before
+    // this list is iterated, and are skipped from the list via
+    // `m == killer1 / killer2` in the QUIET phase.
+    //
+    // `prev_move` is the move PARENT chose to land on the current position.
+    // 0 means the parent ply was a null-move (or we're at root) — in that
+    // case the continuation table can't be probed and we fall back to
+    // butterfly history only.
+    int prev_move = (ply > 1) ? stacks_[ply - 1].current_move : 0;
+    {
+        int color = cb_->colorToMove;
+        for (int i = 0; i < n_quiets; ++i) {
+            int m = quiets[i];
+            int score = history_.get(color, m);
+            if (prev_move != 0) score += cont_history_.get(prev_move, m);
+            quiet_scores[i] = score;
+        }
+    }
+
+    int killer1 = killers_.primary(ply);
+    int killer2 = killers_.secondary(ply);
 
     // ----------------------------------------------------------------
-    // Move loop. Phases: TT > captures (sorted) > quiets (sorted)
+    // Move loop. Phases (Java Search_PVS_NWS PHASE_*):
+    //   TT > ATTACKING_GOOD > KILLER_1 > KILLER_2 > QUIET > ATTACKING_BAD
     // ----------------------------------------------------------------
     int best_score   = SCORE_MIN;
     int best_move    = 0;
@@ -598,35 +649,47 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     int played_count = 0;
 
     // ----------------------------------------------------------------
-    // Fail-low pruning for non-PV nodes — fires per-move before the
-    // move is actually played. Mirrors Search_PVS_NWS.search() line
-    // 1204-1255 / 1410-1434.
+    // Fail-low pruning helpers — fired only for PHASE_QUIET (LMP +
+    // futility) and PHASE_ATTACKING_BAD (SEE threshold). Java
+    // Search_PVS_NWS line 1216 / 1247. Good captures and killers are
+    // NEVER pre-move pruned — same gate Java applies.
     // ----------------------------------------------------------------
-    auto should_skip_pre_move = [&](int m, bool is_quiet_move) -> bool {
-        // Java requires `movesPerformed > 1` for all these prunings → in
-        // our convention, at least 2 already played.
+    auto should_skip_quiet_pre = [&](int m) -> bool {
         if (is_pv || in_check || played_count < 2) return false;
         if (is_mate_score(alpha) || is_mate_score(beta)) return false;
 
-        if (is_quiet_move) {
-            // LMP (Java line 1221): movesPerformed >= threshold → skip.
-            int lmp_count = (3 + depth * depth / (improving ? 1 : 2)) * 3 / 4;
-            if (played_count >= lmp_count) return true;
+        // LMP (Java line 1221): movesPerformed >= threshold → skip.
+        int lmp_count = (3 + depth * depth / (improving ? 1 : 2)) * 3 / 4;
+        if (played_count >= lmp_count) return true;
 
-            // Futility (Java line 1229): static eval too low to recover.
-            if (depth <= 7) {
-                int futility = depth * 80 * 3 / 4;
-                if (static_eval + futility <= alpha) return true;
-            }
-        } else {
-            // SEE pruning for captures (Java's PHASE_ATTACKING_BAD).
-            if (depth <= 7) {
-                int see = board::see::getSeeCaptureScore(*cb_, m);
-                int see_thresh = -80 * depth * 3 / 4;
-                if (see < see_thresh) return true;
-            }
+        // Futility (Java line 1229): static eval too low to recover.
+        if (depth <= 7) {
+            int futility = depth * 80 * 3 / 4;
+            if (static_eval + futility <= alpha) return true;
+        }
+
+        // SEE pruning for non-captures (Java line 1238-1245). From the 4th
+        // played move onwards at shallow depth, skip quiets that lose
+        // material on the static exchange. Same -SEE_MARGIN*depth/AGGR
+        // threshold as bad-cap SEE prune. `getSeeCaptureScore` handles
+        // quiets correctly: MATERIAL_SEE[EMPTY]=0 makes the formula collapse
+        // to `0 - opponent_recapture_value`, which is exactly the loss we
+        // want to detect.
+        if (played_count >= 3 && depth <= 7) {
+            int see = board::see::getSeeCaptureScore(*cb_, m);
+            int see_thresh = -80 * depth * 3 / 4;
+            if (see < see_thresh) return true;
         }
         return false;
+    };
+
+    auto should_skip_bad_cap_pre = [&](int see) -> bool {
+        if (is_pv || in_check || played_count < 2) return false;
+        if (is_mate_score(alpha) || is_mate_score(beta)) return false;
+        if (depth > 7) return false;
+        // SEE pruning for captures (Java line 1247-1253).
+        int see_thresh = -80 * depth * 3 / 4;
+        return see < see_thresh;
     };
 
     // `forced_extension` is meaningful only for the TT move: it carries
@@ -636,6 +699,10 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     auto try_move = [&](int m, bool is_quiet_move, bool is_tt_move = false,
                         int forced_extension = 0) -> bool {
         int side = cb_->colorToMove;
+
+        // Record THIS ply's chosen move BEFORE descending — child reads it
+        // as its `prev_move` for continuation-history lookups.
+        stacks_[ply].current_move = m;
 
         cb_->doMove(m);
         eval_.after_make(*cb_, m, side);
@@ -675,8 +742,15 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
 
                 // History feedback (Java line 1330-1335). `side` is the
                 // mover (captured before doMove flipped colorToMove).
+                // Butterfly history and continuation history both bias the
+                // reduction: a quiet that's historically been a cutoff
+                // (high `hist`/`cont`) gets searched deeper.
                 int hist = history_.get(side, m);
                 red -= 0.5 * static_cast<double>(hist) / HistoryTable::MAX_VAL;
+                if (prev_move != 0) {
+                    int cont = cont_history_.get(prev_move, m);
+                    red -= 0.5 * static_cast<double>(cont) / ContinuationHistory::MAX_VAL;
+                }
 
                 if (red < 1.0)            red = 1.0;
                 if (red > new_depth - 1)  red = new_depth - 1;
@@ -717,16 +791,22 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
                 if (is_quiet_move) {
                     killers_.on_cutoff(ply, m);
                     history_.on_cutoff(cb_->colorToMove, m, depth);
+                    if (prev_move != 0) {
+                        cont_history_.on_cutoff(prev_move, m, depth);
+                    }
                 }
                 return true;  // beta cutoff
             }
         } else if (is_quiet_move) {
             history_.on_poor(cb_->colorToMove, m, depth);
+            if (prev_move != 0) {
+                cont_history_.on_poor(prev_move, m, depth);
+            }
         }
         return false;
     };
 
-    // Phase 1: TT move first — never pruned, depth carries SME extension.
+    // PHASE_TT — TT move first. Never pruned; depth carries the SME extension.
     if (tt_move != 0 && cb_->isValidMove(tt_move)) {
         bool is_quiet_move = board::mv::is_quiet(tt_move);
         if (try_move(tt_move, is_quiet_move,
@@ -734,23 +814,39 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
         if (aborted_) return alpha;
     }
 
-    // Phase 2: captures sorted by MVV-LVA
-    for (int picked = 0; picked < n_caps; ++picked) {
+    // PHASE_ATTACKING_GOOD — SEE >= 0 captures/promotions, sorted by MVV-LVA.
+    // No pre-move pruning (Java does not prune good captures).
+    for (int picked = 0; picked < n_good_caps; ++picked) {
         int best_i = picked;
-        for (int j = picked + 1; j < n_caps; ++j)
-            if (cap_scores[j] > cap_scores[best_i]) best_i = j;
+        for (int j = picked + 1; j < n_good_caps; ++j)
+            if (good_cap_scores[j] > good_cap_scores[best_i]) best_i = j;
         if (best_i != picked) {
-            std::swap(caps[picked],       caps[best_i]);
-            std::swap(cap_scores[picked], cap_scores[best_i]);
+            std::swap(good_caps[picked],       good_caps[best_i]);
+            std::swap(good_cap_scores[picked], good_cap_scores[best_i]);
         }
-        int m = caps[picked];
+        int m = good_caps[picked];
         if (m == tt_move) continue;
-        if (should_skip_pre_move(m, /*is_quiet=*/false)) continue;
         if (try_move(m, /*is_quiet=*/false)) goto done;
         if (aborted_) return alpha;
     }
 
-    // Phase 3: quiet moves sorted by killer + history
+    // PHASE_KILLER_1 — never pre-move pruned. Killers persist across nodes at
+    // the same ply, so the move may be invalid/illegal in this position;
+    // mirror Java's `isPossible` = `isValidMove && isLegal`.
+    if (killer1 != 0 && killer1 != tt_move
+        && cb_->isValidMove(killer1) && cb_->isLegal(killer1)) {
+        if (try_move(killer1, /*is_quiet=*/true)) goto done;
+        if (aborted_) return alpha;
+    }
+
+    // PHASE_KILLER_2 — same as above, plus must differ from killer1.
+    if (killer2 != 0 && killer2 != tt_move && killer2 != killer1
+        && cb_->isValidMove(killer2) && cb_->isLegal(killer2)) {
+        if (try_move(killer2, /*is_quiet=*/true)) goto done;
+        if (aborted_) return alpha;
+    }
+
+    // PHASE_QUIET — sorted by history. Skip TT and killers (already tried).
     for (int picked = 0; picked < n_quiets; ++picked) {
         int best_i = pick_next_quiet(quiets, quiet_scores, picked, n_quiets);
         if (best_i != picked) {
@@ -758,9 +854,27 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
             std::swap(quiet_scores[picked], quiet_scores[best_i]);
         }
         int m = quiets[picked];
-        if (m == tt_move) continue;
-        if (should_skip_pre_move(m, /*is_quiet=*/true)) continue;
+        if (m == tt_move || m == killer1 || m == killer2) continue;
+        if (should_skip_quiet_pre(m)) continue;
         if (try_move(m, /*is_quiet=*/true)) goto done;
+        if (aborted_) return alpha;
+    }
+
+    // PHASE_ATTACKING_BAD — SEE < 0 captures, sorted by MVV-LVA. SEE pruning
+    // uses the value cached during the split.
+    for (int picked = 0; picked < n_bad_caps; ++picked) {
+        int best_i = picked;
+        for (int j = picked + 1; j < n_bad_caps; ++j)
+            if (bad_cap_scores[j] > bad_cap_scores[best_i]) best_i = j;
+        if (best_i != picked) {
+            std::swap(bad_caps[picked],       bad_caps[best_i]);
+            std::swap(bad_cap_scores[picked], bad_cap_scores[best_i]);
+            std::swap(bad_cap_sees[picked],   bad_cap_sees[best_i]);
+        }
+        int m = bad_caps[picked];
+        if (m == tt_move) continue;
+        if (should_skip_bad_cap_pre(bad_cap_sees[picked])) continue;
+        if (try_move(m, /*is_quiet=*/false)) goto done;
         if (aborted_) return alpha;
     }
 
@@ -850,6 +964,11 @@ int Searcher::singular_move_search(int ply, int depth, int alpha, int beta,
 
     auto try_alt = [&](int m, bool is_quiet_move) -> bool {
         int side = cb_->colorToMove;
+
+        // Record THIS ply's chosen alternative move so the child reads it
+        // as `prev_move` for continuation-history lookups.
+        stacks_[ply].current_move = m;
+
         cb_->doMove(m);
         eval_.after_make(*cb_, m, side);
 

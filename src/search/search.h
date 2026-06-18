@@ -118,6 +118,10 @@ private:
         int  static_eval = 0;
         int  killer1 = 0;
         int  killer2 = 0;
+        // The move CHOSEN at this ply during the current traversal — written
+        // by `try_move` before recursing, read by the child as its "previous
+        // move" for continuation-history lookups. 0 = null-move ply / unset.
+        int  current_move = 0;
     };
 
     // Top-level drivers.
@@ -157,6 +161,7 @@ private:
     nnue::Evaluator     eval_;
     TranspositionTable  tt_;
     HistoryTable        history_;
+    ContinuationHistory cont_history_;
     Killers             killers_;
 
     // Per-ply data. Size is `MAX_PLY + 1` because `update_pv(ply, move)`
