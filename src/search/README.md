@@ -27,8 +27,11 @@ that would each be its own multi-thousand-line port.
 | Internal iterative reduction     | "Reduce depth if TT value is not presented" |
 | Check extension                  | per-move extension on giving-check     |
 | Move ordering: TT > good-cap > kill > quiet > bad-cap | `PHASE_TT..PHASE_ATTACKING_BAD` loop |
+| SEE pruning for quiets           | Java line 1238-1245 (`PHASE_QUIET`)    |
 | Butterfly history                | `IHistoryTable` (registerGood/Bad)     |
-| Killers (2/ply)                  | `env.getKillers()`                     |
+| Continuation history (1-ply)     | `ContinuationHistory.java` — 7×64×7×64 |
+| Killers (2/ply)                  | `env.getKillers()` (Java has 4)        |
+| Eval cache (128 MB)              | NNUE final-layer pass skip via zobrist (`nnue::EvalCache`) |
 | Dynamic time budget              | `TimeController_FloatingTime` + `MoveEvalInAccount` + `ConsumedTimeVSRemainingTimeInAccount` |
 
 ### Dropped
@@ -36,13 +39,13 @@ that would each be its own multi-thousand-line port.
 | Feature                          | Why                                    |
 | -------------------------------- | -------------------------------------- |
 | ProbCut + TT-ProbCut             | Significant churn in pruning decisions |
-| Continuation / capture history   | Three more tables × log + the move-listener plumbing |
+| Capture history                  | One more table × log + the move-listener plumbing |
 | Pawn / material / volatility correction history | Needs incremental hash work |
 | Endgame TB probing               | `probeTB()` — external Syzygy bridge   |
-| Eval cache                       | NNUE already incremental               |
 | Aspiration windows               | MTD(f) replaces them                   |
 | Search statistics                | Stats class                            |
 | SMP / lazy SMP                   | Would need work-splitting + shared TT  |
+| Killers 3 / 4                    | Java keeps 4 per ply; we keep 2        |
 
 ## File layout
 
