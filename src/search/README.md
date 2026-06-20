@@ -30,6 +30,8 @@ that would each be its own multi-thousand-line port.
 | SEE pruning for quiets           | Java line 1238-1245 (`PHASE_QUIET`)    |
 | Butterfly history                | `IHistoryTable` (registerGood/Bad)     |
 | Continuation history (1-ply)     | `ContinuationHistory.java` — 7×64×7×64 |
+| Capture history                  | `(color, attacker, to, captured) → bonus` — 2×7×64×7 |
+| Insufficient-material eval cap   | `SearchImpl.evaluate()` line 258       |
 | Killers (2/ply)                  | `env.getKillers()` (Java has 4)        |
 | Eval cache (128 MB)              | NNUE final-layer pass skip via zobrist (`nnue::EvalCache`) |
 | Dynamic time budget              | `TimeController_FloatingTime` + `MoveEvalInAccount` + `ConsumedTimeVSRemainingTimeInAccount` |
@@ -39,7 +41,6 @@ that would each be its own multi-thousand-line port.
 | Feature                          | Why                                    |
 | -------------------------------- | -------------------------------------- |
 | ProbCut + TT-ProbCut             | Significant churn in pruning decisions |
-| Capture history                  | One more table × log + the move-listener plumbing |
 | Pawn / material / volatility correction history | Needs incremental hash work |
 | Endgame TB probing               | `probeTB()` — external Syzygy bridge   |
 | Aspiration windows               | MTD(f) replaces them                   |

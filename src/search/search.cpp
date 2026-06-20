@@ -102,7 +102,21 @@ bool Searcher::check_for_stop() {
 }
 
 int Searcher::evaluate() {
-    return eval_.evaluate(*cb_);
+    int eval = eval_.evaluate(*cb_);
+
+    // Insufficient-material cap — Java SearchImpl.evaluate() line 258:
+    //   if (!hasSufficientMatingMaterial(stm)) eval = min(getDrawScores(-1), eval);
+    //
+    // When the side-to-move has only K (or K + a single minor) it cannot
+    // FORCE a win even if NNUE returns a large positive score. Capping at
+    // 0 stops the search from pursuing a phantom "winning plan" — same
+    // effect as the draw cut in `isDraw`, but specific to a one-sided lack
+    // of mating material (the symmetric case is already a hard draw).
+    if (eval > SCORE_DRAW
+        && !cb_->hasSufficientMatingMaterial(cb_->colorToMove)) {
+        eval = SCORE_DRAW;
+    }
+    return eval;
 }
 
 void Searcher::update_pv(int ply, int move) {
@@ -125,7 +139,12 @@ int Searcher::score_capture(int move) const noexcept {
     int victim   = board::mv::attacked_piece_index(move);
     int attacker = board::mv::source_piece_index(move);
     // MVV-LVA: prioritise high-value victim, then low-value attacker.
-    return PIECE_VAL[victim] * 16 - PIECE_VAL[attacker];
+    int mvv_lva  = PIECE_VAL[victim] * 16 - PIECE_VAL[attacker];
+    // Blend in capture history. The MAX_VAL scale (~16k) is comparable to
+    // a half-pawn in MVV-LVA terms, so the history weight nudges ordering
+    // without dominating it.
+    int hist     = cap_history_.get(cb_->colorToMove, move);
+    return mvv_lva + hist;
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +674,12 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     // NEVER pre-move pruned — same gate Java applies.
     // ----------------------------------------------------------------
     auto should_skip_quiet_pre = [&](int m) -> bool {
-        if (is_pv || in_check || played_count < 2) return false;
+        // `played_count < 1` mirrors Java's `movesPerformed > 1` *after* the
+        // per-move increment — i.e. the prune applies from the 2nd played
+        // move onwards. Previously we used `< 2` (one stricter than Java),
+        // which silently delayed LMP/futility by a move at every non-PV
+        // node — a measurable Elo leak.
+        if (is_pv || in_check || played_count < 1) return false;
         if (is_mate_score(alpha) || is_mate_score(beta)) return false;
 
         // LMP (Java line 1221): movesPerformed >= threshold → skip.
@@ -684,7 +708,8 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     };
 
     auto should_skip_bad_cap_pre = [&](int see) -> bool {
-        if (is_pv || in_check || played_count < 2) return false;
+        // Same Java-aligned gate as the quiet variant — apply from 2nd move on.
+        if (is_pv || in_check || played_count < 1) return false;
         if (is_mate_score(alpha) || is_mate_score(beta)) return false;
         if (depth > 7) return false;
         // SEE pruning for captures (Java line 1247-1253).
@@ -794,6 +819,11 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
                     if (prev_move != 0) {
                         cont_history_.on_cutoff(prev_move, m, depth);
                     }
+                } else {
+                    // Capture/promotion cutoff — update capture history so
+                    // future visits float this (attacker, to, captured) tuple
+                    // above same-victim alternatives.
+                    cap_history_.on_cutoff(cb_->colorToMove, m, depth);
                 }
                 return true;  // beta cutoff
             }
@@ -802,6 +832,8 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
             if (prev_move != 0) {
                 cont_history_.on_poor(prev_move, m, depth);
             }
+        } else {
+            cap_history_.on_poor(cb_->colorToMove, m, depth);
         }
         return false;
     };

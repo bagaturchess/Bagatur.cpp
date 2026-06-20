@@ -161,6 +161,7 @@ private:
     nnue::Evaluator     eval_;
     TranspositionTable  tt_;
     HistoryTable        history_;
+    CaptureHistory      cap_history_;
     ContinuationHistory cont_history_;
     Killers             killers_;
 

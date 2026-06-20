@@ -57,6 +57,62 @@ private:
 
 
 // ---------------------------------------------------------------------------
+// CaptureHistory — separate butterfly for captures/promotions. Mirrors the
+// dedicated capture history Java keeps alongside the quiet history.
+//
+// Quiet butterfly is `(color, from, to) → bonus`. For captures the (from, to)
+// pair alone is too coarse — a Bishop on d3 capturing on e4 cares whether
+// the victim was a Knight or a Queen — so we key by
+// `(color, attacker_piece, to, captured_piece)`.
+//
+// Used to bias MVV-LVA ordering of good caps (and bad caps) so a capture
+// that has historically refuted opponent lines floats above a same-victim
+// capture by a worse attacker. Crucial near SEE-borderline captures where
+// MVV-LVA alone gives no signal.
+//
+// Memory: 2 × 7 × 64 × 7 = 6,272 ints ≈ 25 KB. Fits comfortably in L1.
+// ---------------------------------------------------------------------------
+class CaptureHistory {
+public:
+    static constexpr int MAX_VAL = 16384;
+
+    void clear() noexcept {
+        for (auto& a : table_)
+            for (auto& b : a)
+                for (auto& c : b)
+                    c.fill(0);
+    }
+
+    int get(int color, int move) const noexcept {
+        int attacker = board::mv::source_piece_index(move);
+        int to       = board::mv::to_index(move);
+        int captured = board::mv::attacked_piece_index(move);
+        return table_[color][attacker][to][captured];
+    }
+
+    void on_cutoff(int color, int move, int depth) noexcept {
+        update(color, move, depth * depth);
+    }
+    void on_poor(int color, int move, int depth) noexcept {
+        update(color, move, -depth);
+    }
+
+private:
+    void update(int color, int move, int bonus) noexcept {
+        int attacker = board::mv::source_piece_index(move);
+        int to       = board::mv::to_index(move);
+        int captured = board::mv::attacked_piece_index(move);
+        std::int32_t& v = table_[color][attacker][to][captured];
+        int clamped_bonus = std::clamp(bonus, -MAX_VAL, MAX_VAL);
+        v += clamped_bonus - v * std::abs(clamped_bonus) / MAX_VAL;
+    }
+
+    // table_[color][attacker_piece][target_sq][captured_piece]
+    std::array<std::array<std::array<std::array<std::int32_t, 7>, 64>, 7>, 2> table_{};
+};
+
+
+// ---------------------------------------------------------------------------
 // ContinuationHistory — 1-ply follow-up bonus. Mirrors Java's
 // `bagaturchess.search.impl.history.ContinuationHistory`. Indexed by
 // (prev_piece, prev_to) → (cur_piece, cur_to); when a quiet move causes a
