@@ -1113,8 +1113,21 @@ Result Searcher::goPVS(const Limits& lim) {
     terminate_search_      = false;
     start_      = std::chrono::steady_clock::now();
     tt_.new_search();
+    // Killers ARE cleared per go() — they're keyed by ply alone, not by
+    // position. After the position changed (1+ moves were played between
+    // searches) most of the previous killers point to moves that are
+    // illegal here, AND the `m == killerN` skip in PHASE_QUIET would
+    // silently drop a legitimate quiet that happens to share encoding
+    // with a stale killer. Carrying them across positions tanks ordering
+    // quality more than the cold-start cost saves. (history tables key by
+    // [color][from][to] so they're position-independent and we KEEP those.)
     killers_.clear();
-    eval_.reset(*cb_);
+    // Note: eval_.reset() is NOT called here — `StateManager::cmd_position`
+    // already invokes `set_board()` which refreshes NNUE accumulators.
+    // search_main.cpp's CLI driver creates a fresh Searcher (whose ctor
+    // calls eval_.reset) so the first go() is consistent there too.
+    // Redundant reset costs ~hundreds-of-microseconds per move = noticeable
+    // on 200 ms / move time controls.
 
     Result best{};
     int alpha = SCORE_MIN, beta = SCORE_MAX;
@@ -1193,8 +1206,21 @@ Result Searcher::goMTD(const Limits& lim) {
     terminate_search_      = false;
     start_      = std::chrono::steady_clock::now();
     tt_.new_search();
+    // Killers ARE cleared per go() — they're keyed by ply alone, not by
+    // position. After the position changed (1+ moves were played between
+    // searches) most of the previous killers point to moves that are
+    // illegal here, AND the `m == killerN` skip in PHASE_QUIET would
+    // silently drop a legitimate quiet that happens to share encoding
+    // with a stale killer. Carrying them across positions tanks ordering
+    // quality more than the cold-start cost saves. (history tables key by
+    // [color][from][to] so they're position-independent and we KEEP those.)
     killers_.clear();
-    eval_.reset(*cb_);
+    // Note: eval_.reset() is NOT called here — `StateManager::cmd_position`
+    // already invokes `set_board()` which refreshes NNUE accumulators.
+    // search_main.cpp's CLI driver creates a fresh Searcher (whose ctor
+    // calls eval_.reset) so the first go() is consistent there too.
+    // Redundant reset costs ~hundreds-of-microseconds per move = noticeable
+    // on 200 ms / move time controls.
 
     // Initial seed value — full static eval at the root. Same scale as what
     // search() returns (side-to-move PoV in negamax).
