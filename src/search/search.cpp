@@ -751,9 +751,11 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
             score = -search(ply + 1, new_depth, -beta, -alpha, is_pv, false, use_sme);
         } else {
             int reduction = 0;
-            // Java doLMR gate (Search_PVS_NWS.java line 1301-1307):
-            //   `movesPerformed > 1` → at least 2 already played before this one.
-            if (is_quiet_move && new_depth >= 2 && played_count >= 2
+            // LMR fires from the 2nd played move onwards — matches Java's
+            // `movesPerformed > 1` gate (Search_PVS_NWS line 1301-1307).
+            // `played_count` is 0-indexed (BEFORE this move), so the 2nd
+            // played move arrives here with played_count == 1.
+            if (is_quiet_move && new_depth >= 2 && played_count >= 1
                 && !in_check && extension == 0) {
 
                 int rd = std::min(63, new_depth);
