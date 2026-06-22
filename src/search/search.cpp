@@ -787,11 +787,16 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
             if (score > alpha && reduction > 0) {
                 score = -search(ply + 1, new_depth, -alpha - 1, -alpha, false, !cut_node, use_sme);
             }
-            // PV re-search — drop the classic `score < beta` gate so
-            // MTD(f)'s null window still triggers (alpha = beta-1 leaves
-            // no integer gap). Forwards `is_pv=true` down so the chosen
-            // subtree can fill its PV stack with no TT/NMP/razor cutoffs.
-            if (score > alpha && is_pv) {
+            // PV re-search — Java Search_PVS_NWS line 1457:
+            //   if (isPv && (moveNumber == 1 || score > bestScore))
+            // The `played_count == 0` half is dead code here (handled by
+            // the separate first-move branch above) but kept for 1:1
+            // fidelity with Java. The `score > best_score` half is the
+            // meaningful trigger: re-search at full window only when this
+            // move actually IMPROVES the running best — looser than the
+            // old `score > alpha` (alpha may have advanced past best_score
+            // via the null-window re-search, masking the improvement).
+            if (is_pv && (played_count == 0 || score > best_score)) {
                 score = -search(ply + 1, new_depth, -beta, -alpha, true, false, use_sme);
             }
         }
