@@ -436,6 +436,17 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
         && stacks_[ply - 4].static_eval != SCORE_MIN
         && stacks_[ply - 2].static_eval <= stacks_[ply - 4].static_eval;
 
+    // Internal iterative reduction (IIR) — 1:1 with Java Search_PVS_NWS:
+    //   line 695 (non-PV IIR, INSIDE the non-PV block, BEFORE NMP/razoring)
+    //   line 996 (PV IIR, after SME)
+    // When `tt_move == 0 && depth >= 2`, reduce depth by 1. We collapse
+    // both into a single check placed BEFORE the non-PV pruning block,
+    // so the reduced depth feeds into static-null / NMP / razoring depth
+    // gates (matching Java's non-PV IIR ordering). For PV nodes the same
+    // reduction fires here — Java's PV IIR is functionally equivalent
+    // since the pruning block below skips PV anyway.
+    if (depth >= 2 && tt_move == 0) --depth;
+
     // ----------------------------------------------------------------
     // Pruning at non-PV nodes — Java Search_PVS_NWS.java lines 714-834
     //
@@ -570,15 +581,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
         }
     }
 
-    // Internal iterative reduction: if we got nothing from the TT and we're
-    // at non-shallow depth, reducing here often pays for itself.
-    //
-    // Gated on `!is_pv` to mirror Java Search_PVS_NWS.java:686-698 — applying
-    // it at PV nodes silently shortens the search depth along the PV chain
-    // (every PV node with a missing TT move loses a ply), so the reported PV
-    // ends short of nominal depth. Non-PV nodes don't carry the PV chain, so
-    // the reduction there has no effect on the displayed PV.
-    if (!is_pv && depth >= 4 && tt_move == 0) --depth;
+    // (IIR moved to before the non-PV pruning block — see above.)
 
     // ----------------------------------------------------------------
     // Collect & order moves
