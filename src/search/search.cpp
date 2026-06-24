@@ -57,8 +57,16 @@ bool Searcher::time_up() noexcept {
     if (terminate_search_)     return true;
     auto now = std::chrono::steady_clock::now();
     double s = std::chrono::duration<double>(now - start_).count();
-    if (s >= total_clock_secs_)       return true;   // hard cap (Java's clock ceiling)
-    if (s >= available_secs())        return true;   // soft, grows with volatility
+    if (s >= total_clock_secs_) return true;   // hard cap (Java's clock ceiling)
+    // Strict in-recursion soft cap. Earlier this was relaxed to `2×
+    // available_secs()` on the theory that the iteration-boundary terminate
+    // gate already prevents over-spend; but at ultra-short TC (8s + 0.08)
+    // the gate sets `terminate_search_` AT the iteration boundary, not
+    // before — an iteration that *starts* just under the gate at elapsed
+    // = 0.5×available can run to 2× without aborting. Over 40 moves this
+    // doubles per-move time and burns the clock. The strict 1× check
+    // matches the Java behavior the engine was tuned against.
+    if (s >= available_secs()) return true;
     return false;
 }
 
@@ -1355,6 +1363,15 @@ Result Searcher::goMTD(const Limits& lim) {
         // may reset bounds to [MIN, MAX] when they trigger isLast() and bump
         // the depth. Mirrors Java's `sentPV = (eval >= getLowerBound())` /
         // `sentPV = (eval <= getUpperBound())` test on line 227 / 264.
+        //
+        // `depth_converged` is true when the manager bumped `current_depth_`
+        // inside the call — i.e. the MTD bisection narrowed to within the
+        // trust window and the next probe will be at a new depth. Used to
+        // gate the dynamic-time volatility update: per-probe bound changes
+        // are MTD noise (a fail-low followed by a fail-high at the same
+        // depth is one converging probe, not two volatile events), so we
+        // only feed depth-to-depth transitions into the volatility model.
+        int pre_depth = mgr.getCurrentDepth();
         bool advanced;
         bool is_lower;   // failed-high → eval is a lower bound on the true score
         if (eval >= beta) {
@@ -1366,6 +1383,7 @@ Result Searcher::goMTD(const Limits& lim) {
             mgr.decreaseUpperBound(eval);
             is_lower = false;
         }
+        bool depth_converged = (mgr.getCurrentDepth() != pre_depth);
 
         // Only update the public Result and fire the info callback when the
         // bound was actually tightened. Mirrors Java's "sentPV" gate.
@@ -1400,11 +1418,17 @@ Result Searcher::goMTD(const Limits& lim) {
 
             if (lim.on_iteration) lim.on_iteration(best, lim.callback_user);
 
-            // Volatility update mirrors Java MoveEvalInAccount.newPVLine().
-            // Use `best.best_move` (the LOWERBOUND-committed move) instead
-            // of `eval`-iteration's possibly-upper-bound move so we track
-            // genuine "best move switched" events, not transient bounds.
-            update_volatility(eval, best.best_move, depth);
+            // Volatility update — only when the depth actually converged.
+            // Earlier this fired on every `advanced` probe (per-bound), so
+            // MTD bisection noise within a single depth (fail-low followed
+            // by fail-high) inflated `vol_accum_score_diff_` and pulled the
+            // dynamic time budget up for the wrong reason. The Java
+            // counterpart in MoveEvalInAccount.newPVLine() is fed by a
+            // committed depth-result, not by intermediate bounds — gating
+            // on `depth_converged` here matches that semantic.
+            if (depth_converged) {
+                update_volatility(best.score, best.best_move, depth);
+            }
         }
 
         // Iteration-boundary terminate gate — Java newIteration() in

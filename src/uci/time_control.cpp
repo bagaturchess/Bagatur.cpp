@@ -97,16 +97,34 @@ void per_move_budget_components(TCType type, const Go& go, int colour,
 }  // namespace
 
 TCType classify(const Go& go, int colour_to_move) noexcept {
-    // Same priority order as TimeControllerFactory.getControllerType line 57-74.
+    // `go ponder` is not supported by the port; treat it as INFINITE so the
+    // engine never returns `bestmove` until the GUI sends `stop` or replaces
+    // the search via a fresh `position`/`go`. Without this, a GUI sending
+    // `go ponder wtime 60000 ...` would burn clock as if it were a real move.
+    if (go.ponder)              return TCType::INFINITE;
     if (go.isAnalyzingMode())   return TCType::INFINITE;
     if (go.hasDepth())          return TCType::FIXED_DEPTH;
     if (go.hasNodes())          return TCType::FIXED_NODES;
     if (go.movetime != Go::UNDEF_MOVETIME) return TCType::TIME_PER_MOVE;
 
     bool is_white = (colour_to_move == 0);
-    std::int64_t inc = is_white ? go.winc : go.binc;
-    if (inc > 0)                return TCType::INCREMENT_PER_MOVE;
+    std::int64_t inc        = is_white ? go.winc  : go.binc;
+    std::int64_t side_clock = is_white ? go.wtime : go.btime;
+
+    // `go` with no time/clock fields at all: behave as INFINITE rather than
+    // silently treating it as sudden-death with a max-int64 clock (which the
+    // per-move budget code then divides to produce garbage).
+    if (side_clock == Go::UNDEF_TIME) return TCType::INFINITE;
+
+    // movestogo TAKES PRIORITY over increment when both are present —
+    // ChessBase/Arena send `wtime ... winc ... movestogo N` for tournaments
+    // with both a per-move bonus AND a per-segment limit. With movestogo=1
+    // (last move before TC) the engine MUST use most of the segment clock,
+    // which only the TOURNAMENT branch's `clock / (mtg + 1)` formula does.
+    // Earlier priority (inc > 0 first) gave min_move ≈ 1.5s for 60+1 with
+    // movestogo=1 — far below the safe usage on the final move of a segment.
     if (go.movestogo != Go::UNDEF_MOVESTOGO) return TCType::TOURNAMENT;
+    if (inc > 0)                             return TCType::INCREMENT_PER_MOVE;
     return TCType::SUDDEN_DEATH;
 }
 

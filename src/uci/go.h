@@ -26,8 +26,12 @@ struct Go {
     bool          infinite  = false;
     int           depth     = UNDEF_DEPTH;
 
-    bool hasNodes() const noexcept { return nodes != UNDEF_NODES; }
-    bool hasDepth() const noexcept { return depth != UNDEF_DEPTH; }
+    // Reject non-positive limits: `go depth 0` / `go nodes 0` should not
+    // pretend to be a real cap — without this, classify() reports FIXED_DEPTH
+    // / FIXED_NODES, then the state manager's `if (limit > 0)` guard skips
+    // setting the limit at all, and the search runs unbounded.
+    bool hasNodes() const noexcept { return nodes != UNDEF_NODES && nodes > 0; }
+    bool hasDepth() const noexcept { return depth != UNDEF_DEPTH && depth > 0; }
     bool isAnalyzingMode() const noexcept { return infinite; }
 
     static Go parse(const std::string& line);
