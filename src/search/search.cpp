@@ -216,8 +216,14 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // happened), 3 = FIDE three-fold. We disable TT cutoff at 2+ visits —
     // a stored entry from the *first* visit could not see the draw lines
     // that become forcible on the *second* visit, so its score is stale.
+    // Same family of staleness for 50-move counter — zobrist omits it, so
+    // an entry stored at low halfmove is misleading near the limit. qsearch
+    // tactical sequences are short (and captures reset the counter) so the
+    // margin can be tight — 90 leaves ~10 plies of slack.
     // TT move is still pulled for ordering; only the cutoff is suppressed.
-    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 2);
+    bool tt_score_unreliable_for_cutoff =
+        (cb_->getRepetition() >= 2)
+        || (cb_->lastCaptureOrPawnMoveBefore >= 90);
 
     int     tt_move  = 0;
     TTEntry tte;
@@ -1030,10 +1036,15 @@ int Searcher::singular_move_search(int ply, int depth, int alpha, int beta,
                               * 0x9E3779B97F4A7C15ULL;
     std::uint64_t hashkey   = cb_->zobristKey ^ rotl64(scrambled, 32);
 
-    // TT probe with the perturbed key
+    // TT probe with the perturbed key. Same staleness guard as main search /
+    // qsearch — entries stored under a different repetition / 50-move
+    // context carry scores that don't apply to the current node.
+    bool sme_tt_unreliable_for_cutoff =
+        (cb_->getRepetition() >= 2)
+        || (cb_->lastCaptureOrPawnMoveBefore + depth >= 100);
     TTEntry tte;
     if (tt_.probe(hashkey, tte)) {
-        if (tte.depth >= depth) {
+        if (tte.depth >= depth && !sme_tt_unreliable_for_cutoff) {
             int tts = score_from_tt(tte.score, ply);
             if (tte.flag == TT_EXACT)                      return tts;
             if (tte.flag == TT_LOWER && tts >= beta)       return tts;
