@@ -83,13 +83,28 @@ void info_callback(const search::Result& r, void* /*user*/) {
     const char* bound_suffix = r.lower_bound ? " lowerbound"
                              : r.upper_bound ? " upperbound"
                                              : "";
-    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu score cp %d%s",
+
+    // UCI: mate scores must be reported as `score mate N` (N in MOVES, signed
+    // — positive = we deliver mate, negative = we get mated). Centipawn-format
+    // is only for non-mate scores. GUIs (Arena, cutechess, Banksia) parse the
+    // two as distinct outputs — printing `score cp 29996` for a forced mate
+    // leaves the GUI's mate-indicator dark and breaks live mate-distance
+    // displays during tournament play.
+    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu",
                 r.depth, r.seldepth,
                 static_cast<unsigned long long>(r.nodes),
                 r.time_secs * 1000.0,
-                static_cast<unsigned long long>(r.nodes / std::max(r.time_secs, 1e-9)),
-                r.score,
-                bound_suffix);
+                static_cast<unsigned long long>(r.nodes / std::max(r.time_secs, 1e-9)));
+    if (search::is_mate_score(r.score)) {
+        // plies = MAX_MATE - |score| (mate scoring convention in this engine).
+        // UCI wants the move count rounded up: moves = (plies + 1) / 2.
+        int plies = search::MAX_MATE - std::abs(r.score);
+        int moves = (plies + 1) / 2;
+        if (r.score < 0) moves = -moves;
+        std::printf(" score mate %d%s", moves, bound_suffix);
+    } else {
+        std::printf(" score cp %d%s", r.score, bound_suffix);
+    }
     if (!r.upper_bound) {
         std::printf(" pv");
         for (int i = 0; i < r.pv_length; ++i) {

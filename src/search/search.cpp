@@ -94,7 +94,17 @@ void Searcher::update_volatility(int eval, int move, int depth) noexcept {
 }
 
 bool Searcher::check_for_stop() {
-    // Avoid clock syscalls on every node — sample every 4096 nodes.
+    // `max_nodes_` is checked per-node so `go nodes N` is exact, BUT only
+    // once we're past the first iteration (`root_depth_ > 1`). At depth=1
+    // we must let the root finish its first legal move's evaluation —
+    // otherwise `go nodes 1` aborts the very first recursive call and we
+    // ship `bestmove 0000`. After depth 1 has produced a fallback PV, any
+    // further abort is safe (the previous depth's bestmove survives).
+    if (max_nodes_ != 0 && nodes_ >= max_nodes_ && root_depth_ > 1) return true;
+
+    // Avoid clock syscalls on every node — sample every 4096 nodes. This
+    // also throttles the depth=1 node-limit check (the iteration completes
+    // ~20 nodes before time_up()'s node check fires).
     if ((++node_check_ & 4095) != 0) return false;
     if (stop_.load(std::memory_order_relaxed)) return true;
     if (time_up()) return true;
@@ -175,14 +185,21 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // call returns instantly (no draw cut), depth bumps without bound, and
     // no `on_iteration` fires because the score never sharpens past the
     // initial seed — so the GUI sees no PV at all.
-    if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
-    if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
-    // `ply > 1` — never short-circuit at root: even in a true insufficient-
-    // material draw the engine must still emit a legal move (UCI forbids
-    // `bestmove 0000` in a non-terminal position). At root we let the search
-    // pick some legal move; at deeper plies the cut prevents drawn-endgame
-    // spin in the MTD(f) loop.
-    if (ply > 1 && !cb_->hasSufficientMatingMaterial()) return SCORE_DRAW;
+    // `ply > 1` — never short-circuit at root: even in a true 3-fold /
+    // 50-move / insufficient-material draw the engine must still emit a
+    // legal move (UCI forbids `bestmove 0000` in a non-terminal position).
+    // At root we let the search pick some legal move; at deeper plies the
+    // cut prevents drawn-endgame spin in the MTD(f) loop. Previously the
+    // 50-move and repetition cuts fired at root too — MTD then raced
+    // through depths with no PV (each iteration "finished" instantly with
+    // no legal move searched) and shipped `bestmove 0000`. Reproduces with
+    // e.g. `position startpos moves g1f3 g8f6 f3g1 f6g8 g1f3 g8f6 f3g1 f6g8`
+    // then `go depth 5`.
+    if (ply > 1) {
+        if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
+        if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
+        if (!cb_->hasSufficientMatingMaterial())     return SCORE_DRAW;
+    }
 
     const int alpha_orig = alpha;   // saved for the alpha-restore step at the end
 
@@ -342,13 +359,16 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
 
     if (ply >= MAX_PLY) return evaluate();
 
-    // Repetition / 50-move / insufficient material — non-PV bails on 2nd visit.
-    // See qsearch() above for the full rationale; same convention.
-    if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
-    if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
-    // See material-check note in search() — guarded by `ply > 1` so the root
-    // never short-circuits without a legal move to ship.
-    if (ply > 1 && !cb_->hasSufficientMatingMaterial()) return SCORE_DRAW;
+    // Repetition / 50-move / insufficient material — non-PV bails on 2nd
+    // visit. See qsearch() above for the full rationale; same convention.
+    // All three are guarded by `ply > 1` — the root MUST emit a legal move
+    // (UCI forbids `bestmove 0000`). Without the guard, `goMTD` would race
+    // through depths with no PV when the root is a 3-fold / 50-move draw.
+    if (ply > 1) {
+        if (cb_->lastCaptureOrPawnMoveBefore >= 100) return SCORE_DRAW;
+        if (cb_->getRepetition() >= (is_pv ? 3 : 2)) return SCORE_DRAW;
+        if (!cb_->hasSufficientMatingMaterial())     return SCORE_DRAW;
+    }
 
     // Mate distance pruning.
     int mate_alpha = std::max(alpha, mated_in(ply));
@@ -389,8 +409,17 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     // happened), 3 = FIDE three-fold. We disable TT cutoff at 2+ visits —
     // a stored entry from the *first* visit could not see the draw lines
     // that become forcible on the *second* visit, so its score is stale.
+    //
+    // Same family of staleness: the zobrist key omits the 50-move half-move
+    // counter, so an entry stored when the counter was low (lots of plies
+    // before draw) gives a misleading cutoff when revisited near the limit
+    // (the score was computed under a wider non-draw horizon than we now
+    // actually have). Mark the cutoff as unreliable when our current search
+    // depth could push us past the 50-move boundary from this node.
     // TT move is still pulled for ordering; only the cutoff is suppressed.
-    bool tt_score_unreliable_for_cutoff = (cb_->getRepetition() >= 2);
+    bool tt_score_unreliable_for_cutoff =
+        (cb_->getRepetition() >= 2)
+        || (cb_->lastCaptureOrPawnMoveBefore + depth >= 100);
 
     int     tt_move  = 0;
     int     tt_score = SCORE_DRAW;
@@ -625,9 +654,14 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     // so the PHASE_ATTACKING_BAD pruning threshold (Java line 1247) uses
     // the precomputed value.
     // ----------------------------------------------------------------
+    // Worst-case legal-move count in chess is 218 (constructed position,
+    // R.D. Nunn). Caps bucket ≤ 64 covers the worst-case captures-only case
+    // (≤ 16 victims × bounded attackers). Quiets bucket sized to 256 so we
+    // never silently drop legal quiets in pathological multi-queen / very
+    // crowded positions.
     int good_caps[64];   int good_cap_scores[64];                            int n_good_caps = 0;
     int bad_caps[64];    int bad_cap_scores[64];    int bad_cap_sees[64];    int n_bad_caps  = 0;
-    int quiets[200];     int quiet_scores[200];                              int n_quiets    = 0;
+    int quiets[256];     int quiet_scores[256];                              int n_quiets    = 0;
 
     gen_.startPly();
     gen_.generateMoves(*cb_);
@@ -1011,7 +1045,7 @@ int Searcher::singular_move_search(int ply, int depth, int alpha, int beta,
 
     // Generate every move at this position
     int caps[64],    cap_scores[64],    n_caps   = 0;
-    int quiets[200], quiet_scores[200], n_quiets = 0;
+    int quiets[256], quiet_scores[256], n_quiets = 0;
 
     gen_.startPly();
     gen_.generateMoves(*cb_);
@@ -1276,6 +1310,7 @@ Result Searcher::goMTD(const Limits& lim) {
 
         int depth = mgr.getCurrentDepth();
         int beta  = mgr.nextBeta();
+        root_depth_ = depth;
 
         // Clamp beta so the null window [β-1, β] survives mate-distance
         // pruning at root (ply=1). search() does:
