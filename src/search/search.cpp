@@ -436,6 +436,21 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
         && stacks_[ply - 4].static_eval != SCORE_MIN
         && stacks_[ply - 2].static_eval <= stacks_[ply - 4].static_eval;
 
+    // `hasAtLeastOnePiece` — Java line 678 (computed once per node). True
+    // when at least one side has a non-pawn piece. Pawn-only positions are
+    // zugzwang-prone, so Java disables the entire non-PV pruning block
+    // (static null / NMP / razoring) AND the per-move LMP/futility/SEE
+    // gate when this is false. PHASE values match Java's: N/B=3, R=5, Q=9.
+    bool has_at_least_one_piece = (cb_->material_factor_white >= 3)
+                               || (cb_->material_factor_black >= 3);
+
+    // `mateThreat` — set by NMP when probe/verify returns a mate score
+    // against us at depth >= 2. Java line 786-790, 794-798. Used later to
+    // disable LMP/futility/SEE-quiet (outer gate, Java line 1206) and LMR
+    // (Java line 1301). Conservative: when NMP suggests a mate threat
+    // exists, we keep full-depth searches on candidate moves.
+    bool mate_threat = false;
+
     // Internal iterative reduction (IIR) — 1:1 with Java Search_PVS_NWS:
     //   line 695 (non-PV IIR, INSIDE the non-PV block, BEFORE NMP/razoring)
     //   line 996 (PV IIR, after SME)
@@ -454,7 +469,8 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     // are taken from Search_PVS_NWS. The volatility-history term is
     // skipped (we don't track it); equivalent to volatility = 0.
     // ----------------------------------------------------------------
-    if (!is_pv && !in_check && !is_mate_score(alpha) && !is_mate_score(beta)) {
+    if (!is_pv && !in_check && has_at_least_one_piece
+        && !is_mate_score(alpha) && !is_mate_score(beta)) {
 
         // ------------------------------------------------------------
         // Fail-high pruning — `static_eval >= beta + 35` gate matches
@@ -506,6 +522,18 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
                         if (is_mate_score(verify)) verify = beta;
                         return verify;
                     }
+
+                    // Java line 786-790: verify returned a mate score against
+                    // us → mate threat exists, disable LMP/LMR below.
+                    if (verify < -MATE_THRESHOLD && depth >= 2) {
+                        mate_threat = true;
+                    }
+                }
+
+                // Java line 794-798: probe returned a mate score against us →
+                // mate threat exists, disable LMP/LMR below.
+                if (score < -MATE_THRESHOLD && depth >= 2) {
+                    mate_threat = true;
                 }
             }
         }
@@ -677,12 +705,16 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     // NEVER pre-move pruned — same gate Java applies.
     // ----------------------------------------------------------------
     auto should_skip_quiet_pre = [&](int m) -> bool {
-        // `played_count < 1` mirrors Java's `movesPerformed > 1` *after* the
-        // per-move increment — i.e. the prune applies from the 2nd played
-        // move onwards. Previously we used `< 2` (one stricter than Java),
-        // which silently delayed LMP/futility by a move at every non-PV
-        // node — a measurable Elo leak.
-        if (is_pv || in_check || played_count < 1) return false;
+        // Outer gate — Java line 1205-1213:
+        //   !isPv && !mateThreat && !ssi.in_check && !isCheckMove
+        //     && mP > 1 && hasAtLeastOnePiece
+        //     && !isMateVal(alpha) && !isMateVal(beta)
+        // `!isCheckMove` we approximate by `extension == 0` in the LMR path
+        // only (we don't have a check-move predicate before doMove here);
+        // pawn-only and mate-threat positions are zugzwang-prone, skip all
+        // the LMP / futility / SEE-quiet pruning there.
+        if (is_pv || in_check || mate_threat || !has_at_least_one_piece) return false;
+        if (played_count < 1) return false;
         if (is_mate_score(alpha) || is_mate_score(beta)) return false;
 
         // LMP (Java line 1221): movesPerformed >= threshold → skip.
@@ -712,7 +744,8 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
 
     auto should_skip_bad_cap_pre = [&](int see) -> bool {
         // Same Java-aligned gate as the quiet variant — apply from 2nd move on.
-        if (is_pv || in_check || played_count < 1) return false;
+        if (is_pv || in_check || mate_threat || !has_at_least_one_piece) return false;
+        if (played_count < 1) return false;
         if (is_mate_score(alpha) || is_mate_score(beta)) return false;
         if (depth > 7) return false;
         // SEE pruning for captures (Java line 1247-1253).
@@ -754,12 +787,13 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
             score = -search(ply + 1, new_depth, -beta, -alpha, is_pv, false, use_sme);
         } else {
             int reduction = 0;
-            // LMR fires from the 2nd played move onwards — matches Java's
-            // `movesPerformed > 1` gate (Search_PVS_NWS line 1301-1307).
-            // `played_count` is 0-indexed (BEFORE this move), so the 2nd
-            // played move arrives here with played_count == 1.
+            // LMR — Java doLMR gate (Search_PVS_NWS.java line 1301-1307):
+            //   !mateThreat && new_depth >= 2 && !in_check && !isCheckMove
+            //     && mP > 1 && isQuiet
+            // `mate_threat` set by NMP if a mate score returned at this node
+            // (zugzwang-style mate threat) — keep full-depth searches there.
             if (is_quiet_move && new_depth >= 2 && played_count >= 1
-                && !in_check && extension == 0) {
+                && !in_check && extension == 0 && !mate_threat) {
 
                 int rd = std::min(63, new_depth);
                 int rm = std::min(63, played_count);
