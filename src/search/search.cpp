@@ -246,14 +246,40 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
         }
     }
 
-    int stand = evaluate();
-    if (stand >= beta) return stand;
-    if (stand > alpha) alpha = stand;
+    // When the side to move is in check, stand-pat is illegal — the attack on
+    // the king MUST be answered. Standing pat here would (a) return a static
+    // NNUE score for a position that might be checkmate, and (b) generate only
+    // captures, missing the king moves / blocks that are often the sole legal
+    // evasions — so qsearch could fail high on a lost position or miss a forced
+    // mate. In check we therefore: never stand-pat, generate ALL legal moves,
+    // never SEE-prune (a losing capture or a quiet block / king retreat can be
+    // the only way out), and report mate when no legal move exists.
+    //
+    // This node is reachable in check via two paths the check-extension does
+    // NOT cover: a capture inside qsearch that gives check (recurses straight
+    // into qsearch), and a TT move searched without check extension dropping to
+    // depth 0. `generateMoves` is itself check-aware (king escapes +
+    // interpositions); `generateAttacks` adds capture-the-checker / capture-
+    // promotion evasions. Together they yield the full evasion set.
+    bool in_check = (cb_->checkingPieces != 0);
 
-    int best      = stand;
+    int stand;
+    int best;
     int best_move = 0;
+    int played    = 0;   // legal moves actually searched (for mate detection)
+
+    if (in_check) {
+        stand = SCORE_MIN;   // sentinel: no valid static eval while in check
+        best  = SCORE_MIN;
+    } else {
+        stand = evaluate();
+        if (stand >= beta) return stand;
+        if (stand > alpha) alpha = stand;
+        best = stand;
+    }
 
     gen_.startPly();
+    if (in_check) gen_.generateMoves(*cb_);   // king moves + interpositions
     gen_.generateAttacks(*cb_);
 
     // Score captures by MVV-LVA inline (no full sort — picks max each iter).
@@ -282,9 +308,11 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
         }
         int m = buf_moves[picked];
 
-        // SEE pruning — skip captures that lose material on the static exchange.
-        // Java line 2079-2084: int see = ...; if (see < 0) continue;
-        if (board::see::getSeeCaptureScore(*cb_, m) < 0) continue;
+        // SEE pruning — skip captures that lose material on the static
+        // exchange (Java line 2079-2084). NOT applied to check evasions: a
+        // losing capture (or a negative-SEE quiet block / king retreat) can be
+        // the only legal way out of check.
+        if (!in_check && board::see::getSeeCaptureScore(*cb_, m) < 0) continue;
 
         int side = cb_->colorToMove;
         cb_->doMove(m);
@@ -294,6 +322,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
         cb_->undoMove(m);
 
         if (aborted_) return alpha;
+        ++played;
 
         if (score > best) {
             best      = score;
@@ -304,6 +333,11 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
             }
         }
     }
+
+    // In check with no legal move played → checkmate. Stalemate is impossible
+    // while in check, so this is always mate (never a draw). Without this the
+    // alpha-restore below would return alpha_orig for a mated position.
+    if (in_check && played == 0) return mated_in(ply);
 
     // Alpha-restore (Java line 2163-2175, `isOther_UseAlphaOptimizationInQSearch`).
     // If neither stand-pat nor any capture exceeded the *input* alpha, clamp
