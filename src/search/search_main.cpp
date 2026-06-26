@@ -82,14 +82,23 @@ int run(int argc, char** argv) {
 
     // Per-iteration printer — UCI-flavoured "info" line on every completed depth.
     lim.on_iteration  = [](const Result& r, void* /*user*/) {
-        std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu score cp %d pv",
+        // Match the production UCI printer (state_manager.cpp): tag the bound
+        // and suppress the PV on an upperbound (fail-low) line — its "best"
+        // move is the one that failed least and would mislead if shown as PV.
+        const char* bound = r.lower_bound ? " lowerbound"
+                          : r.upper_bound ? " upperbound"
+                                          : "";
+        std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu score cp %d%s",
                     r.depth, r.seldepth,
                     static_cast<unsigned long long>(r.nodes),
                     r.time_secs * 1000.0,
                     static_cast<unsigned long long>(r.nodes / std::max(r.time_secs, 1e-9)),
-                    r.score);
-        for (int i = 0; i < r.pv_length; ++i)
-            std::printf(" %s", move_to_uci(r.pv[i]).c_str());
+                    r.score, bound);
+        if (!r.upper_bound) {
+            std::printf(" pv");
+            for (int i = 0; i < r.pv_length; ++i)
+                std::printf(" %s", move_to_uci(r.pv[i]).c_str());
+        }
         std::printf("\n");
         std::fflush(stdout);
     };

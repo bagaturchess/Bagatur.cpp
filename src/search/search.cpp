@@ -1446,44 +1446,62 @@ Result Searcher::goMTD(const Limits& lim) {
         // bound was actually tightened. Mirrors Java's "sentPV" gate.
         if (advanced) {
             Stack& s = stacks_[1];
-            if (s.pv_length > 0) {
-                // CRITICAL — only commit best_move/pv on a LOWERBOUND
-                // (fail-high) advance. Upperbound (fail-low) advances
-                // suppress the PV in the UCI line (per Java's convention),
-                // so committing them silently desyncs the bestmove sent at
-                // the end from the last PV the GUI saw — that is exactly
-                // the "engine shows draw PV but plays losing move" symptom.
-                // Always allow the very first commit (so `bestmove 0000`
-                // is never sent on very short searches).
-                if (is_lower || best.best_move == 0) {
-                    best.best_move = s.pv[0];
-                    std::memcpy(best.pv.data(), s.pv, s.pv_length * sizeof(int));
-                    best.pv_length = s.pv_length;
-                }
+
+            // Commit best_move/pv ONLY on a LOWERBOUND (fail-high) advance.
+            // An upperbound (fail-low) PV is "the move that failed least" and
+            // is unreliable; committing it desyncs the bestmove we finally play
+            // from the last PV the GUI saw ("shows draw PV, plays losing move").
+            // Always allow the very first commit so a short search never ships
+            // `bestmove 0000`.
+            if (s.pv_length > 0 && (is_lower || best.best_move == 0)) {
+                best.best_move = s.pv[0];
+                std::memcpy(best.pv.data(), s.pv, s.pv_length * sizeof(int));
+                best.pv_length = s.pv_length;
             }
-            best.score       = eval;
-            best.lower_bound = is_lower;
-            best.upper_bound = !is_lower;
-            // The MTDSearchManager may have just incremented current_depth_
-            // if this call converged. Report the depth we actually searched.
-            best.depth = depth;
 
-            auto now      = std::chrono::steady_clock::now();
-            best.time_secs= std::chrono::duration<double>(now - start_).count();
-            best.nodes    = nodes_;
-            best.seldepth = sel_depth_;
+            // Commit the public score / bound flags / depth ONLY on a
+            // lowerbound advance. An upperbound probe proves only that the true
+            // score is BELOW `eval` — adopting it as `best.score` returns a
+            // final Result whose score (an upper bound) contradicts its move
+            // (the last lowerbound PV), and feeds MTD bound-noise into the
+            // dynamic-time volatility model. On a fail-low we keep the previous
+            // committed lowerbound score, which the chosen move actually earns.
+            bool commit_score = is_lower && (s.pv_length > 0 || best.best_move != 0);
+            if (commit_score) {
+                best.score       = eval;
+                best.lower_bound = true;
+                best.upper_bound = false;
+                // current_depth_ may have just been bumped by convergence;
+                // report the depth we actually searched.
+                best.depth       = depth;
+            }
 
-            if (lim.on_iteration) lim.on_iteration(best, lim.callback_user);
+            auto now        = std::chrono::steady_clock::now();
+            double now_secs = std::chrono::duration<double>(now - start_).count();
+            best.time_secs  = now_secs;
+            best.nodes      = nodes_;
+            best.seldepth   = sel_depth_;
 
-            // Volatility update — only when the depth actually converged.
-            // Earlier this fired on every `advanced` probe (per-bound), so
-            // MTD bisection noise within a single depth (fail-low followed
-            // by fail-high) inflated `vol_accum_score_diff_` and pulled the
-            // dynamic time budget up for the wrong reason. The Java
-            // counterpart in MoveEvalInAccount.newPVLine() is fed by a
-            // committed depth-result, not by intermediate bounds — gating
-            // on `depth_converged` here matches that semantic.
-            if (depth_converged) {
+            // Info line for the GUI reflects THIS probe's bound (so an
+            // upperbound is still visible as `info ... upperbound`), but carries
+            // the last committed move/pv. The UCI printer suppresses the PV on
+            // an upperbound line, so the stale PV is never shown.
+            if (lim.on_iteration) {
+                Result info      = best;
+                info.score       = eval;
+                info.lower_bound = is_lower;
+                info.upper_bound = !is_lower;
+                info.depth       = depth;
+                info.time_secs   = now_secs;
+                lim.on_iteration(info, lim.callback_user);
+            }
+
+            // Volatility / dynamic-time feed: only on a committed lowerbound
+            // convergence — never on upperbound bound-noise (a fail-low followed
+            // by a fail-high within one depth is one converging probe, not two
+            // volatile events). The Java counterpart MoveEvalInAccount.newPVLine()
+            // is likewise fed by a committed depth-result, not intermediate bounds.
+            if (depth_converged && commit_score && best.best_move != 0) {
                 update_volatility(best.score, best.best_move, depth);
             }
         }
