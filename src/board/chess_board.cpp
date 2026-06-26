@@ -38,6 +38,86 @@ void ChessBoard::updateKingValues(int kingColor, int sq) noexcept {
     kingQueenRays[kingColor]  = kingBishopRays[kingColor] | kingRookRays[kingColor];
 }
 
+bool ChessBoard::givesCheck(int move) noexcept {
+    // Castling moves two pieces (king + rook) with several Chess960 overlap
+    // patterns. It is rare and never a capture, so rather than re-derive the
+    // post-castling occupancy by hand we fall back to a make/unmake — doMove
+    // computes `checkingPieces` for us.
+    if (mv::is_castling(move)) {
+        doMove(move);
+        bool chk = (checkingPieces != 0);
+        undoMove(move);
+        return chk;
+    }
+
+    const int us   = colorToMove;
+    const int them = colorToMoveInverse;
+    const int ksq  = kingIndex[them];          // enemy king — never moves here
+
+    const int from = mv::from_index(move);
+    const int to   = mv::to_index(move);
+    const int src  = mv::source_piece_index(move);
+
+    const BB fromBB = 1ULL << from;
+    const BB toBB   = 1ULL << to;
+
+    // Post-move occupancy: vacate `from`, fill `to`. En-passant also removes the
+    // captured pawn, which stands on a different square than `to` — clearing it
+    // is what exposes a rank slider for an en-passant discovered check.
+    BB occ = (allPieces & ~fromBB) | toBB;
+    if (mv::is_ep(move)) {
+        occ &= ~(1ULL << (to + COLOR_FACTOR_8[them]));
+    }
+
+    // Our piece sets with the moved piece relocated from->to. A promotion lands
+    // as the promoted type, not a pawn. The king is intentionally absent (a king
+    // can never give check), so a KING source simply leaves all sets unchanged.
+    BB usN = pieces[us][NIGHT];
+    BB usB = pieces[us][BISHOP];
+    BB usR = pieces[us][ROOK];
+    BB usQ = pieces[us][QUEEN];
+    BB usP = pieces[us][PAWN];
+
+    switch (src) {
+        case PAWN:   usP &= ~fromBB; break;
+        case NIGHT:  usN &= ~fromBB; break;
+        case BISHOP: usB &= ~fromBB; break;
+        case ROOK:   usR &= ~fromBB; break;
+        case QUEEN:  usQ &= ~fromBB; break;
+        default:     break;          // KING
+    }
+    if (mv::is_promotion(move)) {
+        switch (mv::move_type(move)) {
+            case NIGHT:  usN |= toBB; break;
+            case BISHOP: usB |= toBB; break;
+            case ROOK:   usR |= toBB; break;
+            case QUEEN:  usQ |= toBB; break;
+            default:     break;
+        }
+    } else {
+        switch (src) {
+            case PAWN:   usP |= toBB; break;
+            case NIGHT:  usN |= toBB; break;
+            case BISHOP: usB |= toBB; break;
+            case ROOK:   usR |= toBB; break;
+            case QUEEN:  usQ |= toBB; break;
+            default:     break;       // KING
+        }
+    }
+
+    // Does any of our pieces attack the enemy king on the post-move occupancy?
+    // Computing all attackers on `occ` subsumes both the direct check (moved
+    // piece now bears on the king) and the discovered check (a slider revealed
+    // by vacating `from`), and matches checkingPiecesFull() — the value doMove
+    // would store. PAWN_ATTACKS[them][ksq] is, by symmetry, the set of squares
+    // from which one of OUR pawns attacks the enemy king.
+    if (usN & static_moves::KNIGHT_MOVES[ksq])       return true;
+    if (usP & static_moves::PAWN_ATTACKS[them][ksq]) return true;
+    if ((usB | usQ) & magic::bishop_moves(ksq, occ)) return true;
+    if ((usR | usQ) & magic::rook_moves(ksq, occ))   return true;
+    return false;
+}
+
 BB ChessBoard::checkingPiecesFull() const noexcept {
     int king_sq = kingIndex[colorToMove];
     return (pieces[colorToMoveInverse][NIGHT] & static_moves::KNIGHT_MOVES[king_sq])

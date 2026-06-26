@@ -95,6 +95,12 @@ public:
     bool isLegalEPMove(int fromIndex) noexcept;
     bool isValidMove(int move) noexcept;
 
+    // Static check test: true iff `move` (played by the side to move) leaves the
+    // OPPONENT's king in check — WITHOUT mutating the board. Returns the same
+    // answer doMove() would leave in `checkingPieces`, so callers can avoid a
+    // do/undo just to detect a checking move. Castling falls back to make/unmake.
+    bool givesCheck(int move) noexcept;
+
     BAGATUR_FORCE_INLINE bool isDiscoveredMove(int fromIndex) noexcept {
         if (pinnedPiecesDirty) {
             setPinnedAndDiscoPieces();
