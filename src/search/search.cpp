@@ -1524,6 +1524,12 @@ Result Searcher::goMTD(const Limits& lim) {
         if (time_up() || stop_.load(std::memory_order_relaxed)) break;
 
         // Mate found in the proved interval — no value in chasing more depth.
+        // The mgr-bound checks catch a mate that sharpens a bound mid-depth, but
+        // on a CONVERGED depth `initBetas()` has already reset the bounds to
+        // [SCORE_MIN, SCORE_MAX], so they go blind. Fall back to the committed
+        // `best.score` (a lowerbound, set only on a fail-high) to catch the
+        // proven mate after convergence and stop chasing depth on a forced mate.
+        if (depth_converged && best.best_move != 0 && is_mate_score(best.score)) break;
         if (is_mate_score(mgr.getLowerBound()) && mgr.getLowerBound() > 0) break;
         if (is_mate_score(mgr.getUpperBound()) && mgr.getUpperBound() < 0) break;
     }
