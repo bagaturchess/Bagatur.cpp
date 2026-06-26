@@ -84,12 +84,20 @@ go ──► stop_and_join_search()
         }
 ```
 
-* Each iteration of the search calls the `info_callback`, which prints a
-  `info depth … pv …` line to stdout under a mutex.
-* `position` invalidates the NNUE accumulators (they're a function of the
-  piece layout), so the searcher is dropped and re-created on the next `go`.
-* `ucinewgame` additionally wipes the searcher — including its 512 MB TT —
-  so the new game starts with a clean transposition table.
+* Each iteration of the search fires the `info_callback`, which streams an
+  `info depth … pv …` line to stdout. Emission is throttled to ~12/s
+  (`kMinInfoIntervalSecs = 80 ms`), but the first PV-bearing line of every
+  depth is force-emitted so a GUI never misses a depth. Upperbound (fail-low)
+  lines carry the `upperbound` tag and omit the PV; engine replies
+  (`uciok` / `readyok` / `bestmove`) are serialized through `io_mutex_`.
+* `position` rebuilds the board, replays the moves, then **rebinds** the
+  searcher to it via `set_board()` and refreshes the NNUE accumulators — but
+  KEEPS the searcher alive. Dropping its 512 MB TT + 128 MB eval cache on
+  every move collapses NPS ~10× under a GUI like Arena, so the TT and the
+  position-independent history tables are deliberately carried across the
+  moves of a game.
+* `ucinewgame` is the one place the searcher IS wiped (`searcher_.reset()`),
+  so the next game starts with a clean 512 MB transposition table.
 
 ## Network — embedded, not loaded from disk
 
