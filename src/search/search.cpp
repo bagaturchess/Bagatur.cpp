@@ -158,6 +158,15 @@ int Searcher::score_capture(int move) const noexcept {
     int attacker = board::mv::source_piece_index(move);
     // MVV-LVA: prioritise high-value victim, then low-value attacker.
     int mvv_lva  = PIECE_VAL[victim] * 16 - PIECE_VAL[attacker];
+    // Promotion gain. Without this a quiet queen promotion scores ~ -100
+    // (EMPTY victim, PAWN attacker) and sorts BELOW ordinary captures, even
+    // though SEE rightly classifies it as a strong move. `move_type` returns
+    // the promoted-piece index (NIGHT..QUEEN) for promotions; add its value on
+    // the same MVV-LVA scale so a queen promo orders near a queen capture and
+    // capture-promotions float above their plain-capture MVV-LVA rank.
+    if (board::mv::is_promotion(move)) {
+        mvv_lva += PIECE_VAL[board::mv::move_type(move)] * 16;
+    }
     // Blend in capture history. The MAX_VAL scale (~16k) is comparable to
     // a half-pawn in MVV-LVA terms, so the history weight nudges ordering
     // without dominating it.
@@ -850,12 +859,26 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
         cb_->doMove(m);
         eval_.after_make(*cb_, m, side);
 
+        // Check extension (cheap proxy: did this move leave the opponent in
+        // check?). `cb_->doMove` above already flipped the side, so
+        // checkingPieces now reflects a check GIVEN by `m`.
+        int check_extension = (cb_->checkingPieces != 0) ? 1 : 0;
+
         int extension;
         if (is_tt_move) {
+            // `forced_extension` carries the SME verdict (-2 / 0 / +1 / +2).
+            // Java feeds it through exclusively, but that lets a checking TT
+            // move — usually the best move — be searched a ply SHALLOWER than
+            // the same move in a later phase (which gets the check extension),
+            // and at depth 1 it drops the child straight into qsearch while in
+            // check. Preserve an explicit SME demotion (negative), but never
+            // discard the check extension when SME did not extend.
             extension = forced_extension;
+            if (extension >= 0 && check_extension > extension) {
+                extension = check_extension;
+            }
         } else {
-            // Check extension (cheap proxy: are we now in check?)
-            extension = (cb_->checkingPieces != 0) ? 1 : 0;
+            extension = check_extension;
         }
 
         int new_depth = depth - 1 + extension;
