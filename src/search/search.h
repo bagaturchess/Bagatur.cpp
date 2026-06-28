@@ -24,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 
 #include "../board/chess_board.h"
 #include "../board/move_generator.h"
@@ -90,7 +91,11 @@ struct Result {
 
 class Searcher {
 public:
+    // Owns its own transposition table (single-threaded / standalone use).
     Searcher(board::ChessBoard& cb, std::size_t tt_mb = 512);
+    // Shares an externally-owned transposition table — used by the SMP search,
+    // where every worker thread probes/stores into one lock-free shared table.
+    Searcher(board::ChessBoard& cb, TranspositionTable& shared_tt);
 
     // Run iterative deepening up to the given limits. Returns the best move &
     // score found at the deepest fully completed iteration.
@@ -108,7 +113,7 @@ public:
         eval_.reset(cb);
     }
 
-    TranspositionTable& tt() noexcept { return tt_; }
+    TranspositionTable& tt() noexcept { return *tt_; }
 
 private:
     // Per-ply data used by the search routines.
@@ -159,7 +164,10 @@ private:
     // carry across moves of a game).
     board::ChessBoard*  cb_;
     nnue::Evaluator     eval_;
-    TranspositionTable  tt_;
+    // `tt_` points at either `owned_tt_` (standalone) or an external shared
+    // table (SMP). The lock-free TT makes shared concurrent access safe.
+    std::unique_ptr<TranspositionTable> owned_tt_;
+    TranspositionTable*                 tt_;
     HistoryTable        history_;
     CaptureHistory      cap_history_;
     ContinuationHistory cont_history_;

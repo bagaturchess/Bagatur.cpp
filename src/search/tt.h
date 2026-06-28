@@ -1,26 +1,29 @@
-// Transposition table — 4-bucket replacement scheme.
+// Transposition table — 4-entry buckets, lock-free for SMP.
 //
-// Each TT entry packs (16 bytes total, one bucket = one 64-byte cache line):
-//   key32  (high 32 bits of zobrist for verification)
-//   move   (Bagatur 22-bit move encoding)
-//   score  (int16; ply-relative for mate scores)
-//   eval   (int16; raw static eval at the node, for re-use)
-//   depth  (int16; widened from int8 — SME double extension lets internal
-//           depth exceed parent's depth by +1 per ply, and root cap is
-//           MAX_PLY-1=127 so pathological chains can overflow int8)
-//   flag   (int8 TTFlag)
-//   gen    (uint8 generation for aging — unsigned so ++ wraps cleanly)
+// Each entry is two 64-bit words accessed with std::atomic (relaxed ordering),
+// so multiple search threads read and write the shared table WITHOUT locks or
+// mutexes. A store writes the data word first, then commits the key word; a
+// probe re-reads the key word to reject a torn read. A rare torn / colliding
+// entry is harmless: probe verifies `key32`, and the search separately validates
+// the TT move (isValidMove / isLegal) and treats the score only as a bound.
+//
+// Packing (16 bytes = one slot, four slots = one 64-byte cache-line bucket):
+//   w0 : [ key32 : 32 ][ depth : 16 ][ flag : 8 ][ gen : 8 ]
+//   w1 : [ move  : 32 ][ score : 16 ][ eval : 16 ]
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
-#include <vector>
+#include <memory>
 
 #include "../board/types.h"
 #include "types.h"
 
 namespace search {
 
+// Decoded entry — the value type returned by probe() and consumed by the search.
+// The on-wire storage is the atomic Slot below; this stays a plain struct.
 struct TTEntry {
     std::uint32_t key32;
     std::int32_t  move;
@@ -30,39 +33,41 @@ struct TTEntry {
     std::int8_t   flag;
     std::uint8_t  gen;
 };
-static_assert(sizeof(TTEntry) == 16, "TT entry should be 16 bytes for clean bucketing");
-
-struct TTBucket {
-    TTEntry e[4];
-};
-static_assert(sizeof(TTBucket) == 64, "Bucket should be one cache line");
 
 class TranspositionTable {
 public:
     explicit TranspositionTable(std::size_t mb = 512);
     void resize(std::size_t mb);
     void clear();
-    void new_search() noexcept { ++gen_; }
+    void new_search() noexcept { ++gen_; }  // called between searches (no concurrent search)
 
-    // Probe: returns true if a matching entry was found (sets `out`).
-    // `score` in the entry is converted from-tt at the caller via score_from_tt.
+    // Probe: returns true if a matching, non-torn entry was found (sets `out`).
+    // `score` is decoded as stored; the caller applies score_from_tt for ply.
     bool probe(board::BB key, TTEntry& out) const noexcept;
 
-    // Store. Replacement policy:
-    //   1. Empty slot (flag == TT_NONE) — claim it.
-    //   2. Same-key slot — preserve old move when new has none; keep the
-    //      old entry instead of overwriting when the new store is much
-    //      shallower AND non-exact (otherwise iterative-deepening / MTD
-    //      probes would let a depth-0 qsearch UPPER erase a depth-12 EXACT).
-    //   3. Otherwise pick the slot with the lowest age-weighted depth
-    //      (`depth + (gen == cur ? 0 : -4)`).
+    // Store. Same replacement policy as before (empty slot → same key →
+    // age-weighted shallowest), now writing the two atomic words lock-free.
     void store(board::BB key, int move, int score, int eval, int depth,
                TTFlag flag, int ply) noexcept;
 
 private:
-    std::vector<TTBucket> table_;
-    std::size_t           mask_ = 0;
-    std::uint8_t          gen_  = 0;
+    // Two 64-bit atomic words per slot. atomic<uint64_t> is lock-free on x86-64.
+    struct Slot {
+        std::atomic<std::uint64_t> w0;
+        std::atomic<std::uint64_t> w1;
+    };
+    struct Bucket {
+        Slot e[4];
+    };
+    static_assert(sizeof(Slot)   == 16, "TT slot should be 16 bytes");
+    static_assert(sizeof(Bucket) == 64, "TT bucket should be one cache line");
+
+    // Atomics are non-copyable/non-movable, so a std::vector won't do — own a
+    // raw bucket array instead.
+    std::unique_ptr<Bucket[]> table_;
+    std::size_t               num_buckets_ = 0;
+    std::size_t               mask_        = 0;
+    std::uint8_t              gen_         = 0;
 };
 
 }  // namespace search

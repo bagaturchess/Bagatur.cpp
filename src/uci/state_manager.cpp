@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -149,6 +150,8 @@ void StateManager::send_id_and_uciok() const {
     std::string idn = std::string(REPLY_ID_NAME) + " " + ENGINE_NAME + " " + ENGINE_VERSION;
     send(idn);
     send(std::string(REPLY_ID_AUTHOR) + " " + ENGINE_AUTHOR);
+    send("option name ThreadsCount type spin default 1 min 1 max " + std::to_string(max_threads()));
+    send("option name TTSize type spin default 512 min 1 max 65536");
     send(REPLY_UCIOK);
 }
 
@@ -160,15 +163,32 @@ void StateManager::reset_board_to_startpos() {
     board_ = board::cbu::getNewCB();
 }
 
+int StateManager::max_threads() const {
+    unsigned hc = std::thread::hardware_concurrency();
+    if (hc == 0) hc = 1;
+    return 2 * static_cast<int>(hc);
+}
+
+void StateManager::ensure_tt() {
+    if (!tt_) tt_ = std::make_unique<search::TranspositionTable>(static_cast<std::size_t>(tt_size_mb_));
+}
+
 void StateManager::ensure_searcher() {
-    if (!searcher_) {
-        searcher_ = std::make_unique<search::Searcher>(*board_, /*tt_mb=*/512);
-    }
+    ensure_tt();
+    if (!searcher_) searcher_ = std::make_unique<search::Searcher>(*board_, *tt_);
+}
+
+void StateManager::ensure_smp() {
+    ensure_tt();
+    // Recreate when the thread count changed (worker count is fixed per object).
+    if (!smp_ || smp_->threads() != threads_count_)
+        smp_ = std::make_unique<search::smp::SMPSearcher>(*board_, *tt_, threads_count_);
 }
 
 void StateManager::stop_and_join_search() {
     if (search_thread_.joinable()) {
         if (searcher_) searcher_->stop();
+        if (smp_)      smp_->stop();
         search_thread_.join();
     }
     search_running_.store(false, std::memory_order_relaxed);
@@ -185,8 +205,10 @@ void StateManager::cmd_isready() {
 void StateManager::cmd_ucinewgame() {
     stop_and_join_search();
     reset_board_to_startpos();
-    // Drop the searcher so it gets a fresh TT for the new game.
+    // Fresh game: drop the searchers and clear the shared TT (kept allocated).
     searcher_.reset();
+    smp_.reset();
+    if (tt_) tt_->clear();
 }
 
 void StateManager::cmd_position(const std::string& line) {
@@ -212,15 +234,16 @@ void StateManager::cmd_position(const std::string& line) {
     // info across moves. Dropping them on every `position` command makes
     // NPS collapse ~10× under a GUI like Arena because every move pays
     // the 640 MB allocation again and starts from a cold TT.
-    if (searcher_) {
-        searcher_->set_board(*board_);
-    }
+    if (searcher_) searcher_->set_board(*board_);
+    if (smp_)      smp_->set_board(*board_);
 }
 
 void StateManager::cmd_go(const std::string& line) {
     stop_and_join_search();
-    ensure_searcher();
     reset_info_emitter();   // every `go` starts a fresh emission cadence
+
+    const bool use_smp = threads_count_ > 1;
+    if (use_smp) ensure_smp(); else ensure_searcher();
 
     Go go = Go::parse(line);
     int colour_to_move = board_->colorToMove;
@@ -244,8 +267,14 @@ void StateManager::cmd_go(const std::string& line) {
     lim.consumed_vs_remaining = budget.consumed_vs_remaining;
 
     search_running_.store(true, std::memory_order_relaxed);
-    search_thread_ = std::thread([this, lim]() {
-        search::Result res = searcher_->go(lim);
+    search_thread_ = std::thread([this, lim, use_smp]() {
+        search::Result res;
+        if (use_smp) {
+            res = smp_->go(lim);     // SMP bumps the TT generation internally
+        } else {
+            tt_->new_search();       // single shared-TT searcher won't bump itself
+            res = searcher_->go(lim);
+        }
         last_best_move_ = res.best_move;
 
         std::string reply = std::string(REPLY_BESTMOVE) + " " + move_to_uci(res.best_move);
@@ -260,6 +289,35 @@ void StateManager::cmd_stop() {
 
 void StateManager::cmd_quit() {
     stop_and_join_search();
+}
+
+void StateManager::cmd_setoption(const std::string& line) {
+    // Options must not mutate shared state (TT resize, worker recreation) while a
+    // search is live — a concurrent TTSize resize would reallocate the table out
+    // from under the worker threads. Per UCI, setoption only arrives when idle,
+    // but guard anyway.
+    stop_and_join_search();
+
+    // setoption name <Name> value <V>
+    std::size_t name_pos  = line.find("name ");
+    std::size_t value_pos = line.find(" value ");
+    if (name_pos == std::string::npos || value_pos == std::string::npos) return;
+
+    std::string name = line.substr(name_pos + 5, value_pos - (name_pos + 5));
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+    int v = std::atoi(line.substr(value_pos + 7).c_str());
+
+    if (name == "ThreadsCount") {
+        if (v < 1) v = 1;
+        if (v > max_threads()) v = max_threads();
+        threads_count_ = v;
+    } else if (name == "TTSize") {
+        if (v < 1)     v = 1;
+        if (v > 65536) v = 65536;
+        tt_size_mb_ = v;
+        if (tt_) tt_->resize(static_cast<std::size_t>(tt_size_mb_));
+    }
+    // Unknown options are silently ignored (per UCI).
 }
 
 int StateManager::run() {
@@ -281,7 +339,7 @@ int StateManager::run() {
         else if (cmd == CMD_STOP)        cmd_stop();
         else if (cmd == CMD_QUIT)      { cmd_quit(); break; }
         else if (cmd == CMD_PONDERHIT) { /* pondering not supported in this minimal port */ }
-        else if (cmd == CMD_SETOPTION) { /* no options defined — silently accept */ }
+        else if (cmd == CMD_SETOPTION) cmd_setoption(line);
         // unknown commands are silently ignored, per UCI spec
     }
     return 0;

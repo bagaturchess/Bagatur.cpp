@@ -120,6 +120,7 @@ add_library(search STATIC
     src/search/tt.cpp
     src/search/mtd.cpp
     src/search/search.cpp
+    src/search/smp/smp_searcher.cpp
 )
 target_include_directories(search PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(search PUBLIC nnue)

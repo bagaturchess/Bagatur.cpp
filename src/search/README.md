@@ -45,19 +45,23 @@ that would each be its own multi-thousand-line port.
 | Endgame TB probing               | `probeTB()` — external Syzygy bridge   |
 | Aspiration windows               | MTD(f) replaces them                   |
 | Search statistics                | Stats class                            |
-| SMP / lazy SMP                   | Would need work-splitting + shared TT  |
 | Killers 3 / 4                    | Java keeps 4 per ply; we keep 2        |
+
+> **SMP (lazy SMP)** is implemented — see [SMP — Lazy SMP](#smp--lazy-smp).
 
 ## File layout
 
 ```
 src/search/
   types.h          score constants, TT flags, mate helpers
-  tt.{h,cpp}       4-bucket transposition table
+  tt.{h,cpp}       4-bucket transposition table — LOCK-FREE (atomic words) for SMP
   history.h        butterfly history + killers (header-only)
   mtd.{h,cpp}      BetaGenerator + MTDSearchManager (γ-stepping bounds)
   search.{h,cpp}   the Searcher class — goMTD / goPVS / search / qsearch
   search_main.cpp  CLI driver
+  smp/
+    searchers_merge.h     per-thread result merge   (SearchersInfo port)
+    smp_searcher.{h,cpp}  Lazy-SMP coordinator      (MTDParallelSearch port)
 ```
 
 ## API
@@ -178,6 +182,53 @@ in `O(log Δ)` probes instead of `O(Δ / interval)`.
 `Limits::use_mtd = false` drops to `goPVS()` — a vanilla iterative-deepening
 loop with `[SCORE_MIN, SCORE_MAX]` at the root. Useful for A/B testing
 search changes when you don't want MTD's narrowing dynamics in the mix.
+
+## SMP — Lazy SMP
+
+Multi-threaded search is a port of `bagaturchess`
+`MTDParallelSearch_ThreadsImpl` + `MTDParallelSearch_BaseImpl` + `SearchersInfo`.
+It is enabled by the `ThreadsCount` UCI option (default 1); `StateManager` routes
+`go` to the SMP coordinator when it is `> 1`, otherwise to the single `Searcher`.
+
+**Workers.** `smp::SMPSearcher` runs N independent `Searcher` instances, one per
+`std::thread`, each on its OWN copy of the position, all sharing ONE
+transposition table — the only inter-thread cooperation. Every worker has its own
+eval, history and killers. (Unlike the Java version, `RootSearchFirstMoveIndex`
+diversification is intentionally not used; divergence comes purely from threads
+racing through the shared TT, as in classic Lazy SMP.)
+
+**Shared TT, lock-free.** `tt.{h,cpp}` stores each entry as two
+`std::atomic<uint64_t>` words accessed with `memory_order_relaxed` — concurrent
+read/write with NO locks or mutexes. A store writes the data word, then commits
+the key word; a probe re-reads the key word to reject a torn read. A rare
+torn / colliding entry is harmless: probe verifies `key32`, and the search
+separately validates the TT move (`isValidMove` / `isLegal`) and treats the score
+only as a bound. The `Searcher` takes the table by reference:
+
+```cpp
+TranspositionTable tt(tt_mb);
+Searcher worker(board_copy, tt);   // shared, non-owning (vs the owning tt_mb ctor)
+```
+
+**Merge.** Each worker reports its per-iteration `Result` to
+`smp::SearchersMerge` (mutex-guarded — only the TT must be lock-free). The merge
+mirrors `SearchersInfo`:
+
+  - ignores fail-low (`upperbound`) iterations and PV-less ones;
+  - advances a consensus depth once the first worker reaches the next depth
+    (`threshold = 1 / threads`);
+  - at the consensus depth, groups the workers' results by best move and
+    aggregates the eval per move — the best mate value for mates, otherwise the
+    AVERAGE across the agreeing workers;
+  - picks the move with the highest aggregated eval; sums node counts.
+
+The coordinator streams the merged `info` to the GUI and returns the merged best
+move. Each worker self-times with the same budget, so they finish together; an
+external `stop` halts any stragglers. The TT generation is bumped once per search
+by the coordinator.
+
+Scaling on a 16-core machine: ~2.5× nps at 4 threads (0.80 → 2.0 Mnps), one ply
+deeper in the same wall-clock budget. Net Elo from threads is an SPRT question.
 
 ## Dynamic time budget
 

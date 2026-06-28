@@ -45,7 +45,13 @@ constexpr int SCORE_BAD_CAP    = -(1 << 28);
 }  // namespace
 
 Searcher::Searcher(board::ChessBoard& cb, std::size_t tt_mb)
-    : cb_(&cb), tt_(tt_mb) {
+    : cb_(&cb), owned_tt_(std::make_unique<TranspositionTable>(tt_mb)),
+      tt_(owned_tt_.get()) {
+    eval_.reset(cb);
+}
+
+Searcher::Searcher(board::ChessBoard& cb, TranspositionTable& shared_tt)
+    : cb_(&cb), tt_(&shared_tt) {
     eval_.reset(cb);
 }
 
@@ -244,7 +250,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
 
     int     tt_move  = 0;
     TTEntry tte;
-    if (tt_.probe(cb_->zobristKey, tte)) {
+    if (tt_->probe(cb_->zobristKey, tte)) {
         int tt_score = score_from_tt(tte.score, ply);
         tt_move      = tte.move;
 
@@ -366,7 +372,7 @@ int Searcher::qsearch(int ply, int alpha, int beta, bool is_pv) {
     // ----------------------------------------------------------------
     TTFlag flag = (best >= beta) ? TT_LOWER
                  : (best > alpha_orig ? TT_EXACT : TT_UPPER);
-    tt_.store(cb_->zobristKey, best_move, best, stand, /*depth=*/0, flag, ply);
+    tt_->store(cb_->zobristKey, best_move, best, stand, /*depth=*/0, flag, ply);
 
     return best;
 }
@@ -483,7 +489,7 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     int     tt_depth = -1;
     TTFlag  tt_flag  = TT_NONE;
     TTEntry tte;
-    if (tt_.probe(cb_->zobristKey, tte)) {
+    if (tt_->probe(cb_->zobristKey, tte)) {
         tt_move  = tte.move;
         tt_score = score_from_tt(tte.score, ply);
         tt_depth = tte.depth;
@@ -1070,7 +1076,7 @@ done:
     // TT store
     TTFlag flag = (best_score >= beta) ? TT_LOWER
                  : (best_score > alpha_orig ? TT_EXACT : TT_UPPER);
-    tt_.store(cb_->zobristKey, best_move, best_score, static_eval, depth, flag, ply);
+    tt_->store(cb_->zobristKey, best_move, best_score, static_eval, depth, flag, ply);
     return best_score;
 }
 
@@ -1108,7 +1114,7 @@ int Searcher::singular_move_search(int ply, int depth, int alpha, int beta,
         (cb_->getRepetition() >= 2)
         || (cb_->lastCaptureOrPawnMoveBefore + depth >= 100);
     TTEntry tte;
-    if (tt_.probe(hashkey, tte)) {
+    if (tt_->probe(hashkey, tte)) {
         if (tte.depth >= depth && !sme_tt_unreliable_for_cutoff) {
             int tts = score_from_tt(tte.score, ply);
             if (tte.flag == TT_EXACT)                      return tts;
@@ -1226,7 +1232,7 @@ sm_done:
         TTFlag f = (best_score >= beta)       ? TT_LOWER
                  : (best_score > alpha_orig)  ? TT_EXACT
                                               : TT_UPPER;
-        tt_.store(hashkey, best_move, best_score, /*eval=*/0,
+        tt_->store(hashkey, best_move, best_score, /*eval=*/0,
                   depth, f, ply);
     }
 
@@ -1261,7 +1267,7 @@ Result Searcher::goPVS(const Limits& lim) {
     vol_usage_pct_         = 0.0;
     terminate_search_      = false;
     start_      = std::chrono::steady_clock::now();
-    tt_.new_search();
+    if (owned_tt_) tt_->new_search();  // shared TT: coordinator bumps gen once
     // Killers ARE cleared per go() — they're keyed by ply alone, not by
     // position. After the position changed (1+ moves were played between
     // searches) most of the previous killers point to moves that are
@@ -1354,7 +1360,7 @@ Result Searcher::goMTD(const Limits& lim) {
     vol_usage_pct_         = 0.0;
     terminate_search_      = false;
     start_      = std::chrono::steady_clock::now();
-    tt_.new_search();
+    if (owned_tt_) tt_->new_search();  // shared TT: coordinator bumps gen once
     // Killers ARE cleared per go() — they're keyed by ply alone, not by
     // position. After the position changed (1+ moves were played between
     // searches) most of the previous killers point to moves that are

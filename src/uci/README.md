@@ -16,9 +16,10 @@ The C++ design mirrors the Java original 1:1 where it can:
 | `uci::TimeBudget` / `compute()`    | `bagaturchess.search.impl.uci_adaptor.timemanagement.*`  |
 | `uci::uci_to_move` / `move_to_uci` | `bagaturchess.uci.api.utils.uci.UCIMoveConverter`        |
 
-There are intentional simplifications: no `UCIOptions` (cutechess and friends
-work fine without them), no ponder bookkeeping beyond accepting the flag,
-no channel abstraction (writes go straight to stdout).
+Two UCI options are exposed — `ThreadsCount` and `TTSize` (see
+[UCI options](#uci-options)). Otherwise the layer is deliberately minimal: no
+ponder bookkeeping beyond accepting the flag, no channel abstraction (writes go
+straight to stdout).
 
 ## Files
 
@@ -76,13 +77,18 @@ relaxing to 1× by 20 000 ms, never below 1×.
 
 ```
 go ──► stop_and_join_search()
-   ──► ensure_searcher()                  (lazy; reused across `go`s)
+   ──► ThreadsCount == 1 ? ensure_searcher()   (single Searcher, shared TT)
+                         : ensure_smp()          (SMPSearcher, N workers, shared TT)
    ──► compute(go, side) → TimeBudget
    ──► search_thread = thread {
-            res = searcher_->go(lim);
+            res = use_smp ? smp_->go(lim) : (tt_->new_search(), searcher_->go(lim));
             send "bestmove " + uci(res.best_move);
         }
 ```
+
+`StateManager` owns one lock-free `TranspositionTable` (sized by `TTSize`) and
+injects it into both the single `Searcher` and every SMP worker — see
+[search/smp](../search/README.md#smp--lazy-smp) for the coordinator + merge.
 
 * Each iteration of the search fires the `info_callback`, which streams an
   `info depth … pv …` line to stdout. Emission is throttled to ~12/s
@@ -90,14 +96,28 @@ go ──► stop_and_join_search()
   depth is force-emitted so a GUI never misses a depth. Upperbound (fail-low)
   lines carry the `upperbound` tag and omit the PV; engine replies
   (`uciok` / `readyok` / `bestmove`) are serialized through `io_mutex_`.
-* `position` rebuilds the board, replays the moves, then **rebinds** the
-  searcher to it via `set_board()` and refreshes the NNUE accumulators — but
-  KEEPS the searcher alive. Dropping its 512 MB TT + 128 MB eval cache on
-  every move collapses NPS ~10× under a GUI like Arena, so the TT and the
-  position-independent history tables are deliberately carried across the
-  moves of a game.
-* `ucinewgame` is the one place the searcher IS wiped (`searcher_.reset()`),
-  so the next game starts with a clean 512 MB transposition table.
+* `position` rebuilds the board, replays the moves, then **rebinds** whichever
+  searchers exist (single and/or SMP) to it via `set_board()` and refreshes the
+  NNUE accumulators — but KEEPS them alive. Dropping the shared TT + eval cache
+  on every move collapses NPS ~10× under a GUI like Arena, so the TT and the
+  position-independent history tables are deliberately carried across the moves
+  of a game. (Each SMP worker keeps its own private copy of the board.)
+* `ucinewgame` drops both searchers and clears the shared TT, so the next game
+  starts from an empty transposition table.
+
+## UCI options
+
+Both options are **dynamic** — they take effect at runtime, no engine restart
+needed. `cmd_setoption` first joins any running search (per the UCI spec
+`setoption` only arrives when idle, but a `TTSize` resize must not reallocate the
+table out from under the worker threads).
+
+| Option         | Type | Default | Range             | Effect |
+| -------------- | ---- | ------- | ----------------- | ------ |
+| `ThreadsCount` | spin | 1       | 1 … 2×CPU-cores   | SMP worker count. Applied on the next `go` (1 → single `Searcher`; > 1 → `SMPSearcher`, recreated when the count changes). |
+| `TTSize`       | spin | 512     | 1 … 65536 (MB)    | Shared transposition-table size. Resized immediately. |
+
+The `max` for `ThreadsCount` is `2 × std::thread::hardware_concurrency()`.
 
 ## Network — embedded, not loaded from disk
 
@@ -162,5 +182,6 @@ cutechess-cli \
   -pgnout match.pgn
 ```
 
-No `option` / `setoption` is implemented — cutechess sends a few defaults
-that the engine silently accepts (per the UCI spec).
+Set `ThreadsCount` / `TTSize` per engine in cutechess with, e.g.,
+`option.ThreadsCount=4 option.TTSize=256`; any other `setoption` is silently
+accepted (per the UCI spec).
