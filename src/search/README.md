@@ -3,6 +3,20 @@
 C++17 port of `bagaturchess.search.impl.alg.impl1.Search_PVS_NWS` — the
 PVS/NWS alpha-beta searcher that drives the Bagatur engine.
 
+Most of the searcher is textbook PVS/NWS with the usual pruning family
+(null-move, razoring, LMR, SEE, singular extensions). **Two things are
+distinctive**, and each has a dedicated section below:
+
+- **[MTD(f) root driver](#mtdf-γ-stepping)** — the root score is found by a
+  sequence of null-window probes that *bisect* toward the true value, with an
+  exponential "trend" ramp to recover from a far-off seed. There are no
+  aspiration windows: every probe ends with one bound sharpened and seeds the
+  next one.
+- **[Consensus Lazy SMP](#smp--lazy-smp)** — the parallel search does not just
+  replay the deepest thread's move. The threads *vote*: their per-move results
+  are merged at a consensus depth, evals are averaged across the threads that
+  agree on a move, and the move with the best aggregated eval wins.
+
 ## Scope of the port
 
 This is a **faithful-to-spirit** port, not a 1:1 mirror. The Java file is 2275
@@ -190,42 +204,74 @@ Multi-threaded search is a port of `bagaturchess`
 It is enabled by the `ThreadsCount` UCI option (default 1); `StateManager` routes
 `go` to the SMP coordinator when it is `> 1`, otherwise to the single `Searcher`.
 
-**Workers.** `smp::SMPSearcher` runs N independent `Searcher` instances, one per
+### Workers
+
+`smp::SMPSearcher` runs N independent `Searcher` instances, one per
 `std::thread`, each on its OWN copy of the position, all sharing ONE
 transposition table — the only inter-thread cooperation. Every worker has its own
 eval, history and killers. (Unlike the Java version, `RootSearchFirstMoveIndex`
 diversification is intentionally not used; divergence comes purely from threads
 racing through the shared TT, as in classic Lazy SMP.)
 
-**Shared TT, lock-free.** `tt.{h,cpp}` stores each entry as two
-`std::atomic<uint64_t>` words accessed with `memory_order_relaxed` — concurrent
-read/write with NO locks or mutexes. A store writes the data word, then commits
-the key word; a probe re-reads the key word to reject a torn read. A rare
-torn / colliding entry is harmless: probe verifies `key32`, and the search
-separately validates the TT move (`isValidMove` / `isLegal`) and treats the score
-only as a bound. The `Searcher` takes the table by reference:
+### Shared TT, lock-free
+
+`tt.{h,cpp}` stores each entry as two `std::atomic<uint64_t>` words accessed with
+`memory_order_relaxed` — concurrent read/write with NO locks or mutexes. A store
+writes the data word, then commits the key word; a probe re-reads the key word to
+reject a torn read. A rare torn / colliding entry is harmless: probe verifies
+`key32`, and the search separately validates the TT move (`isValidMove` /
+`isLegal`) and treats the score only as a bound. The `Searcher` takes the table
+by reference:
 
 ```cpp
 TranspositionTable tt(tt_mb);
 Searcher worker(board_copy, tt);   // shared, non-owning (vs the owning tt_mb ctor)
 ```
 
-**Merge.** Each worker reports its per-iteration `Result` to
-`smp::SearchersMerge` (mutex-guarded — only the TT must be lock-free). The merge
-mirrors `SearchersInfo`:
+### Consensus merge — the distinctive part
 
-  - ignores fail-low (`upperbound`) iterations and PV-less ones;
-  - advances a consensus depth once the first worker reaches the next depth
-    (`threshold = 1 / threads`);
-  - at the consensus depth, groups the workers' results by best move and
-    aggregates the eval per move — the best mate value for mates, otherwise the
-    AVERAGE across the agreeing workers;
-  - picks the move with the highest aggregated eval; sums node counts.
+Most Lazy-SMP engines simply play the move of whichever thread happens to be
+deepest when time runs out. Bagatur instead treats the N workers as N *voters*
+and forms a consensus — a port of `SearchersInfo`. `smp::SearchersMerge` does
+this under a plain mutex (only the TT has to be lock-free; the merge is touched a
+few times per millisecond, so a lock costs nothing measurable).
+
+Every completed worker iteration is offered to the merge, which:
+
+1. **Filters.** Fail-low (`upperbound`) and PV-less iterations are dropped — a
+   move that merely "failed least" is not a real vote.
+2. **Finds the consensus depth.** The reported depth advances to `d` as soon as
+   the *first* worker completes depth `d` (`threshold = 1 / threads`); the merge
+   then reads every worker's latest result at that depth.
+3. **Tallies votes per move.** The results at the consensus depth are grouped by
+   their best move, and each candidate move gets one aggregate eval:
+   - if any voter sees a **mate**, the move takes the best (shortest) mate score;
+   - otherwise the eval is the **average** across the workers that chose it.
+4. **Elects a winner.** The move with the highest aggregated eval is reported;
+   its PV and depth come from the worker that earned that eval. Node counts are
+   summed across all workers, so the reported `nodes` / `nps` are aggregate —
+   total work across threads ÷ wall-clock time.
+
+Worked example at the consensus depth, 4 threads:
+
+| Worker | best move | eval |
+| ------ | --------- | ---- |
+| 0      | `e2e4`    | +31  |
+| 1      | `e2e4`    | +21  |
+| 2      | `d2d4`    | +28  |
+| 3      | `e2e4`    | +35  |
+
+`e2e4` collects three votes averaging `(31 + 21 + 35) / 3 = +29`; `d2d4` has a
+single vote at `+28`. `e2e4` wins at `+29` — and note it is reported *below* the
+single best raw score (`+35`), because averaging deliberately damps one thread's
+optimistic outlier. It still beats `d2d4`, even though `d2d4` alone outscored two
+of the three `e2e4` voters. Rewarding agreement rather than the loudest single
+thread is the whole point of the vote.
 
 The coordinator streams the merged `info` to the GUI and returns the merged best
-move. Each worker self-times with the same budget, so they finish together; an
-external `stop` halts any stragglers. The TT generation is bumped once per search
-by the coordinator.
+move. Workers self-time with the same budget so they finish together; an external
+`stop` halts any stragglers. The TT generation is bumped once per search by the
+coordinator.
 
 Scaling on a 16-core machine: ~2.5× nps at 4 threads (0.80 → 2.0 Mnps), one ply
 deeper in the same wall-clock budget. Net Elo from threads is an SPRT question.
