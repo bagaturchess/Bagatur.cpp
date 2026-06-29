@@ -8,8 +8,9 @@
 //     `bestmove` once it returns.
 //   * Stream `info ...` lines from the search through the iteration callback.
 //
-// Minimalist: no UCIOptions, no ponder bookkeeping beyond accepting the flag,
-// no Channel abstraction (writes go straight to stdout).
+// Minimalist: three UCI options (ThreadsCount, TTSize, UCI_Chess960), no ponder
+// bookkeeping beyond accepting the flag, no Channel abstraction (writes go
+// straight to stdout).
 
 #pragma once
 
@@ -65,6 +66,7 @@ private:
 
     int  threads_count_ = 1;     // UCI option ThreadsCount
     int  tt_size_mb_    = 512;    // UCI option TTSize (MB)
+    bool frc960_        = false;  // UCI option UCI_Chess960 (king-takes-rook notation)
 
     std::thread       search_thread_;
     std::atomic<bool> search_running_{false};

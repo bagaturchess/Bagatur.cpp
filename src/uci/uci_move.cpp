@@ -1,10 +1,29 @@
 #include "uci_move.h"
 
+#include "../board/castling_config.h"
 #include "../board/move_generator.h"
 
 namespace uci {
 
-int uci_to_move(board::ChessBoard& cb, const std::string& uci) {
+namespace {
+
+// Chess960: map a castling move's king-target (G1/C1/G8/C8) to the rook's
+// start square, which is the destination square used in king-takes-rook
+// notation. Falls through to the input for any non-castling target.
+int rook_from_for_king_target(const board::CastlingConfig& c, int king_to) {
+    using CC = board::CastlingConfig;
+    switch (king_to) {
+        case CC::G1: return c.from_rook_ks_w;
+        case CC::C1: return c.from_rook_qs_w;
+        case CC::G8: return c.from_rook_ks_b;
+        case CC::C8: return c.from_rook_qs_b;
+    }
+    return king_to;
+}
+
+}  // namespace
+
+int uci_to_move(board::ChessBoard& cb, const std::string& uci, bool frc) {
     if (uci.size() < 4) return 0;
 
     // UCI: A1 = file 0, rank 0; H1 = file 7, rank 0; ...
@@ -35,7 +54,20 @@ int uci_to_move(board::ChessBoard& cb, const std::string& uci) {
         int m = gen.next();
         if (!cb.isLegal(m)) continue;
         if (board::mv::from_index(m) != from_b) continue;
-        if (board::mv::to_index(m)   != to_b)   continue;
+
+        int  m_to       = board::mv::to_index(m);
+        bool to_matches = (m_to == to_b);
+
+        // Chess960: castling arrives as king-takes-rook, so the input's
+        // destination is the rook's start square, not the king's two-square
+        // target. (Classic "e1g1" still matches above; in 960 positions where
+        // the rook sits on the king-target square the two forms coincide.)
+        if (!to_matches && frc && board::mv::is_castling(m)) {
+            if (rook_from_for_king_target(cb.castlingConfig, m_to) == to_b)
+                to_matches = true;
+        }
+        if (!to_matches) continue;
+
         if (board::mv::is_promotion(m)) {
             if (promo == 0)                            continue;
             if (board::mv::move_type(m) != promo)      continue;
@@ -49,11 +81,17 @@ int uci_to_move(board::ChessBoard& cb, const std::string& uci) {
     return result;
 }
 
-std::string move_to_uci(int move) {
+std::string move_to_uci(int move, const board::CastlingConfig* frc_cfg) {
     if (move == 0) return "0000";
 
     int from_b = board::mv::from_index(move);
     int to_b   = board::mv::to_index(move);
+
+    // Chess960: emit castling as king-takes-rook (destination = rook square).
+    if (frc_cfg != nullptr && board::mv::is_castling(move)) {
+        to_b = rook_from_for_king_target(*frc_cfg, to_b);
+    }
+
     int from_n = from_b ^ 7;
     int to_n   = to_b   ^ 7;
 

@@ -16,10 +16,10 @@ The C++ design mirrors the Java original 1:1 where it can:
 | `uci::TimeBudget` / `compute()`    | `bagaturchess.search.impl.uci_adaptor.timemanagement.*`  |
 | `uci::uci_to_move` / `move_to_uci` | `bagaturchess.uci.api.utils.uci.UCIMoveConverter`        |
 
-Two UCI options are exposed — `ThreadsCount` and `TTSize` (see
-[UCI options](#uci-options)). Otherwise the layer is deliberately minimal: no
-ponder bookkeeping beyond accepting the flag, no channel abstraction (writes go
-straight to stdout).
+Three UCI options are exposed — `ThreadsCount`, `TTSize` and `UCI_Chess960`
+(see [UCI options](#uci-options)). Otherwise the layer is deliberately minimal:
+no ponder bookkeeping beyond accepting the flag, no channel abstraction (writes
+go straight to stdout).
 
 ## Files
 
@@ -51,6 +51,25 @@ Move parsing is done by generating the legal-move list for the current
 position and matching by `(from, to, promotion)`. That is robust against
 move-encoding differences and inherits castling/EP correctness from the
 generator.
+
+### Chess960 castling notation
+
+Castling is encoded internally as the king's two-square target
+(king→`G1`/`C1`/`G8`/`C8`), which prints as the classic `e1g1` / `e1c1`. With the
+`UCI_Chess960` option on, the boundary uses **king-takes-rook** instead (`e1h1`,
+or an arbitrary rook file in a shuffled start) — the unambiguous form GUIs use
+for 960, where king and rook files vary:
+
+* `move_to_uci(move, &castlingConfig)` maps the king-target back to the rook's
+  start square for the printed destination.
+* `uci_to_move(cb, str, /*frc=*/true)` accepts that king-takes-rook form — and,
+  leniently, still the classic king-target, since a king never has a
+  non-castling two-square move so the two forms can't collide.
+
+The board mechanics underneath are FRC-capable **unconditionally**: FEN castling
+rights parse in both `KQkq` and Shredder/X-FEN file-letter form, rook start
+squares are detected from the position, and castle legality uses the 960
+rook-shield rule. `UCI_Chess960` only switches the *notation* at this boundary.
 
 ## Time controllers
 
@@ -112,10 +131,11 @@ needed. `cmd_setoption` first joins any running search (per the UCI spec
 `setoption` only arrives when idle, but a `TTSize` resize must not reallocate the
 table out from under the worker threads).
 
-| Option         | Type | Default | Range             | Effect |
-| -------------- | ---- | ------- | ----------------- | ------ |
-| `ThreadsCount` | spin | 1       | 1 … 2×CPU-cores   | SMP worker count. Applied on the next `go` (1 → single `Searcher`; > 1 → `SMPSearcher`, recreated when the count changes). |
-| `TTSize`       | spin | 512     | 1 … 65536 (MB)    | Shared transposition-table size. Resized immediately. |
+| Option         | Type  | Default | Range             | Effect |
+| -------------- | ----- | ------- | ----------------- | ------ |
+| `ThreadsCount` | spin  | 1       | 1 … 2×CPU-cores   | SMP worker count. Applied on the next `go` (1 → single `Searcher`; > 1 → `SMPSearcher`, recreated when the count changes). |
+| `TTSize`       | spin  | 512     | 1 … 65536 (MB)    | Shared transposition-table size. Resized immediately. |
+| `UCI_Chess960` | check | false   | true / false      | Chess960 castling I/O. When `true`, castling is read and written as king-takes-rook (`e1h1`) instead of the classic king-target (`e1g1`) — see [Chess960 castling notation](#chess960-castling-notation). Board mechanics are FRC-capable regardless; this only switches the notation. |
 
 The `max` for `ThreadsCount` is `2 × std::thread::hardware_concurrency()`.
 
@@ -182,6 +202,8 @@ cutechess-cli \
   -pgnout match.pgn
 ```
 
-Set `ThreadsCount` / `TTSize` per engine in cutechess with, e.g.,
+Set options per engine in cutechess with, e.g.,
 `option.ThreadsCount=4 option.TTSize=256`; any other `setoption` is silently
-accepted (per the UCI spec).
+accepted (per the UCI spec). For Chess960 matches cutechess sends
+`setoption name UCI_Chess960 value true` automatically when the variant is
+`fischerandom`, so castling moves round-trip as king-takes-rook.

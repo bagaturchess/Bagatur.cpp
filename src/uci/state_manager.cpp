@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 
+#include "../board/castling_config.h"
 #include "../board/chess_board_util.h"
 #include "../nnue/nnue.h"
 #include "go.h"
@@ -48,7 +49,12 @@ InfoEmitterState g_info_state;
 
 constexpr double kMinInfoIntervalSecs = 0.080;  // 80 ms ≈ 12 emissions/sec ceiling
 
-void info_callback(const search::Result& r, void* /*user*/) {
+void info_callback(const search::Result& r, void* user) {
+    // `user` carries the Chess960 castling config (king-takes-rook notation) or
+    // nullptr for classic king-target notation. The castling layout is fixed for
+    // the whole game, so the root board's config is valid for every PV move.
+    const auto* frc_cfg = static_cast<const board::CastlingConfig*>(user);
+
     int  cur_best   = (r.pv_length > 0) ? r.pv[0] : 0;
 
     bool depth_changed      = (r.depth != g_info_state.last_depth);
@@ -109,7 +115,7 @@ void info_callback(const search::Result& r, void* /*user*/) {
     if (!r.upper_bound) {
         std::printf(" pv");
         for (int i = 0; i < r.pv_length; ++i) {
-            std::printf(" %s", move_to_uci(r.pv[i]).c_str());
+            std::printf(" %s", move_to_uci(r.pv[i], frc_cfg).c_str());
         }
     }
     std::printf("\n");
@@ -152,6 +158,7 @@ void StateManager::send_id_and_uciok() const {
     send(std::string(REPLY_ID_AUTHOR) + " " + ENGINE_AUTHOR);
     send("option name ThreadsCount type spin default 1 min 1 max " + std::to_string(max_threads()));
     send("option name TTSize type spin default 512 min 1 max 65536");
+    send("option name UCI_Chess960 type check default false");
     send(REPLY_UCIOK);
 }
 
@@ -219,7 +226,7 @@ void StateManager::cmd_position(const std::string& line) {
                               : board::cbu::getNewCB(pos.fen);
 
     for (const std::string& mv : pos.moves) {
-        int m = uci_to_move(*board_, mv);
+        int m = uci_to_move(*board_, mv, frc960_);
         if (m == 0) {
             // Illegal / unrecognised — refuse to advance further but keep
             // the legal prefix that already applied.
@@ -254,7 +261,9 @@ void StateManager::cmd_go(const std::string& line) {
     search::Limits lim;
     lim.use_mtd       = true;
     lim.on_iteration  = info_callback;
-    lim.callback_user = nullptr;
+    // In Chess960 mode the info callback formats castling as king-takes-rook;
+    // pass the (game-stable) castling config through, nullptr ⇒ classic.
+    lim.callback_user = frc960_ ? &board_->castlingConfig : nullptr;
 
     if (budget.depth_limit > 0)  lim.max_depth = budget.depth_limit;
     if (budget.node_limit  > 0)  lim.max_nodes = static_cast<std::uint64_t>(budget.node_limit);
@@ -277,7 +286,8 @@ void StateManager::cmd_go(const std::string& line) {
         }
         last_best_move_ = res.best_move;
 
-        std::string reply = std::string(REPLY_BESTMOVE) + " " + move_to_uci(res.best_move);
+        const board::CastlingConfig* bm_cfg = frc960_ ? &board_->castlingConfig : nullptr;
+        std::string reply = std::string(REPLY_BESTMOVE) + " " + move_to_uci(res.best_move, bm_cfg);
         send(reply);
         search_running_.store(false, std::memory_order_relaxed);
     });
@@ -305,17 +315,25 @@ void StateManager::cmd_setoption(const std::string& line) {
 
     std::string name = line.substr(name_pos + 5, value_pos - (name_pos + 5));
     while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
-    int v = std::atoi(line.substr(value_pos + 7).c_str());
+
+    // Raw value string (spin options atoi it, the check option compares it).
+    std::string val = line.substr(value_pos + 7);
+    while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
+    while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
 
     if (name == "ThreadsCount") {
+        int v = std::atoi(val.c_str());
         if (v < 1) v = 1;
         if (v > max_threads()) v = max_threads();
         threads_count_ = v;
     } else if (name == "TTSize") {
+        int v = std::atoi(val.c_str());
         if (v < 1)     v = 1;
         if (v > 65536) v = 65536;
         tt_size_mb_ = v;
         if (tt_) tt_->resize(static_cast<std::size_t>(tt_size_mb_));
+    } else if (name == "UCI_Chess960") {
+        frc960_ = (val == "true" || val == "1");
     }
     // Unknown options are silently ignored (per UCI).
 }

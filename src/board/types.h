@@ -63,7 +63,6 @@ inline constexpr int  MAX_PLIES                = 2 * MAX_MOVES;
 inline constexpr bool GENERATE_BR_PROMOTIONS   = true;
 inline constexpr bool ASSERT_ENABLED           = false;
 inline constexpr bool DUMP_CASTLING            = false;
-inline constexpr bool IS_FRC                   = false;
 
 // ---- Bit twiddling (Long.numberOfTrailingZeros, lowestOneBit, bitCount) ----
 BAGATUR_FORCE_INLINE int trailing_zeros(BB b) noexcept {
