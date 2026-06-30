@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(BagaturCpp LANGUAGES CXX)
+project(BagaturCpp LANGUAGES CXX C)
 
 # ------------------------------------------------------------------ language
 set(CMAKE_CXX_STANDARD 20)
@@ -115,6 +115,20 @@ target_link_libraries(perft_eval PRIVATE nnue)
 add_executable(benchmark_eval src/nnue/benchmark_eval.cpp)
 target_link_libraries(benchmark_eval PRIVATE nnue)
 
+# ------------------------------------------------------------------ syzygy (Fathom)
+# Self-contained Syzygy tablebase prober. tbprobe.c #includes tbchess.c, so it is
+# the only C translation unit; syzygy.cpp is the C++ wrapper that the search and
+# UCI layers call with a ChessBoard.
+add_library(syzygy STATIC
+    src/syzygy/tbprobe.c
+    src/syzygy/syzygy.cpp
+)
+target_include_directories(syzygy PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/syzygy   # tbprobe.h does `#include <tbconfig.h>`
+)
+target_link_libraries(syzygy PUBLIC bagatur)
+
 # ------------------------------------------------------------------ search
 add_library(search STATIC
     src/search/tt.cpp
@@ -123,7 +137,7 @@ add_library(search STATIC
     src/search/smp/smp_searcher.cpp
 )
 target_include_directories(search PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(search PUBLIC nnue)
+target_link_libraries(search PUBLIC nnue syzygy)
 
 add_executable(search_main src/search/search_main.cpp)
 target_link_libraries(search_main PRIVATE search)

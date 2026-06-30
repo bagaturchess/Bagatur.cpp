@@ -12,6 +12,7 @@
 #include "../board/castling_config.h"
 #include "../board/chess_board_util.h"
 #include "../nnue/nnue.h"
+#include "../syzygy/syzygy.h"
 #include "go.h"
 #include "position.h"
 #include "protocol.h"
@@ -97,11 +98,12 @@ void info_callback(const search::Result& r, void* user) {
     // two as distinct outputs — printing `score cp 29996` for a forced mate
     // leaves the GUI's mate-indicator dark and breaks live mate-distance
     // displays during tournament play.
-    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu",
+    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu tbhits %llu",
                 r.depth, r.seldepth,
                 static_cast<unsigned long long>(r.nodes),
                 r.time_secs * 1000.0,
-                static_cast<unsigned long long>(r.nodes / std::max(r.time_secs, 1e-9)));
+                static_cast<unsigned long long>(r.nodes / std::max(r.time_secs, 1e-9)),
+                static_cast<unsigned long long>(r.tbhits));
     if (search::is_mate_score(r.score)) {
         // plies = MAX_MATE - |score| (mate scoring convention in this engine).
         // UCI wants the move count rounded up: moves = (plies + 1) / 2.
@@ -159,6 +161,7 @@ void StateManager::send_id_and_uciok() const {
     send("option name ThreadsCount type spin default 1 min 1 max " + std::to_string(max_threads()));
     send("option name TTSize type spin default 512 min 1 max 65536");
     send("option name UCI_Chess960 type check default false");
+    send("option name SyzygyPath type string default <empty>");
     send(REPLY_UCIOK);
 }
 
@@ -249,6 +252,29 @@ void StateManager::cmd_go(const std::string& line) {
     stop_and_join_search();
     reset_info_emitter();   // every `go` starts a fresh emission cadence
 
+    // Root Syzygy probe (DTZ). Runs single-threaded here, BEFORE any worker
+    // thread starts — tb_probe_root is not thread-safe. On a hit the optimal
+    // move (respecting the 50-move rule) is known immediately; emit one info
+    // line + bestmove and skip the search entirely.
+    if (syzygy::Syzygy::instance().available()) {
+        int wdl = 0;
+        int tb_move = syzygy::Syzygy::instance().probe_root(*board_, wdl);
+        if (tb_move != 0) {
+            int score = (wdl == syzygy::WDL_WIN)  ?  search::TB_WIN_SCORE
+                      : (wdl == syzygy::WDL_LOSS) ? -search::TB_WIN_SCORE
+                      :  search::SCORE_DRAW;
+            const board::CastlingConfig* cfg = frc960_ ? &board_->castlingConfig : nullptr;
+            search::Result r;
+            r.depth = 1; r.seldepth = 1; r.score = score;
+            r.best_move = tb_move; r.pv[0] = tb_move; r.pv_length = 1;
+            r.tbhits = 1;
+            info_callback(r, const_cast<board::CastlingConfig*>(cfg));
+            last_best_move_ = tb_move;
+            send(std::string(REPLY_BESTMOVE) + " " + move_to_uci(tb_move, cfg));
+            return;
+        }
+    }
+
     const bool use_smp = threads_count_ > 1;
     if (use_smp) ensure_smp(); else ensure_searcher();
 
@@ -334,6 +360,10 @@ void StateManager::cmd_setoption(const std::string& line) {
         if (tt_) tt_->resize(static_cast<std::size_t>(tt_size_mb_));
     } else if (name == "UCI_Chess960") {
         frc960_ = (val == "true" || val == "1");
+    } else if (name == "SyzygyPath") {
+        // Load (or unload, on "<empty>") the Syzygy tablebases. Done while the
+        // search is idle (joined above) since tb_init reallocates global state.
+        syzygy::Syzygy::instance().init(val);
     }
     // Unknown options are silently ignored (per UCI).
 }

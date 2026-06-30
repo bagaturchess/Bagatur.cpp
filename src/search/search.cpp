@@ -9,6 +9,7 @@
 
 #include "../board/move_util.h"
 #include "../board/see_util.h"
+#include "../syzygy/syzygy.h"
 #include "mtd.h"
 
 namespace search {
@@ -499,6 +500,25 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
             if (tt_flag == TT_EXACT) return tt_score;
             if (tt_flag == TT_LOWER && tt_score >= beta)  return tt_score;
             if (tt_flag == TT_UPPER && tt_score <= alpha) return tt_score;
+        }
+    }
+
+    // Syzygy WDL probe. At non-root nodes whose position is in the tablebases
+    // (the probe enforces castling == 0 / rule50 == 0 / pieces <= max), the
+    // win/draw/loss verdict is exact — return it and store EXACT with a boosted
+    // depth so the subtree is pruned consistently. Mirrors Stockfish's in-search
+    // TB cutoff; tb_probe_wdl is thread-safe, so the SMP workers may all probe.
+    if (ply > 1 && syzygy::Syzygy::instance().available()) {
+        int wdl = syzygy::Syzygy::instance().probe_wdl(*cb_);
+        if (wdl != syzygy::WDL_FAIL) {
+            ++tb_hits_;
+            int tb = (wdl == syzygy::WDL_WIN)  ?  TB_WIN_SCORE - ply
+                   : (wdl == syzygy::WDL_LOSS) ? -TB_WIN_SCORE + ply
+                   :  SCORE_DRAW;
+            int store_depth = std::min(depth + 6, MAX_PLY - 1);
+            tt_->store(cb_->zobristKey, 0, score_to_tt(tb, ply), 0,
+                       store_depth, TT_EXACT, ply);
+            return tb;
         }
     }
 
@@ -1251,6 +1271,7 @@ Result Searcher::go(const Limits& lim) {
 // ---------------------------------------------------------------------------
 Result Searcher::goPVS(const Limits& lim) {
     nodes_      = 0;
+    tb_hits_    = 0;
     node_check_ = 0;
     sel_depth_  = 0;
     aborted_    = false;
@@ -1306,6 +1327,7 @@ Result Searcher::goPVS(const Limits& lim) {
         auto now      = std::chrono::steady_clock::now();
         best.time_secs= std::chrono::duration<double>(now - start_).count();
         best.nodes    = nodes_;
+        best.tbhits   = tb_hits_;
         best.seldepth = sel_depth_;
 
         if (lim.on_iteration) lim.on_iteration(best, lim.callback_user);
@@ -1344,6 +1366,7 @@ Result Searcher::goPVS(const Limits& lim) {
 // ---------------------------------------------------------------------------
 Result Searcher::goMTD(const Limits& lim) {
     nodes_      = 0;
+    tb_hits_    = 0;
     node_check_ = 0;
     sel_depth_  = 0;
     aborted_    = false;
@@ -1486,6 +1509,7 @@ Result Searcher::goMTD(const Limits& lim) {
             double now_secs = std::chrono::duration<double>(now - start_).count();
             best.time_secs  = now_secs;
             best.nodes      = nodes_;
+            best.tbhits     = tb_hits_;
             best.seldepth   = sel_depth_;
 
             // Info line for the GUI reflects THIS probe's bound (so an

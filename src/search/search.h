@@ -77,6 +77,7 @@ struct Result {
     int            depth      = 0;
     int            seldepth   = 0;
     std::uint64_t  nodes      = 0;
+    std::uint64_t  tbhits     = 0;   // Syzygy tablebase probe hits this search
     double         time_secs  = 0.0;
     std::array<int, MAX_PLY> pv{};
     int            pv_length  = 0;
@@ -186,6 +187,7 @@ private:
 
     // Running counters.
     std::uint64_t                       nodes_     = 0;
+    std::uint64_t                       tb_hits_   = 0;
     std::uint64_t                       node_check_= 0;
     int                                 root_depth_= 0;
     int                                 sel_depth_ = 0;

@@ -36,7 +36,7 @@ public:
     void reset(int start_depth) {
         std::lock_guard<std::mutex> g(mu_);
         cur_depth_ = start_depth;
-        for (auto& w : workers_) { w.by_depth.clear(); w.nodes = 0; }
+        for (auto& w : workers_) { w.by_depth.clear(); w.nodes = 0; w.tbhits = 0; }
     }
 
     // Called by each worker (on its own thread) after a completed iteration.
@@ -44,7 +44,8 @@ public:
         if (r.upper_bound || r.pv_length < 1 || r.best_move == 0) return;
         std::lock_guard<std::mutex> g(mu_);
         Worker& w = workers_[worker_id];
-        w.nodes = r.nodes;
+        w.nodes  = r.nodes;
+        w.tbhits = r.tbhits;
         w.by_depth[r.depth] = r;
     }
 
@@ -59,7 +60,8 @@ public:
 private:
     struct Worker {
         std::map<int, Result> by_depth;   // depth -> last reported Result
-        std::uint64_t         nodes = 0;
+        std::uint64_t         nodes  = 0;
+        std::uint64_t         tbhits = 0;
     };
 
     bool has_depth(int depth) const {
@@ -72,6 +74,12 @@ private:
     std::uint64_t total_nodes() const {
         std::uint64_t n = 0;
         for (const auto& w : workers_) n += w.nodes;
+        return n;
+    }
+
+    std::uint64_t total_tbhits() const {
+        std::uint64_t n = 0;
+        for (const auto& w : workers_) n += w.tbhits;
         return n;
     }
 
@@ -126,6 +134,7 @@ private:
         out.pv_length = rep.pv_length;
         out.pv        = rep.pv;
         out.nodes     = total_nodes();
+        out.tbhits    = total_tbhits();
         return true;
     }
 

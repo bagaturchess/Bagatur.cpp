@@ -15,6 +15,12 @@ inline constexpr int SCORE_MAX      =  MAX_MATE + 1;
 inline constexpr int SCORE_INF      = SCORE_MAX;
 inline constexpr int SCORE_DRAW     = 0;
 
+// Syzygy tablebase win/loss score band. Below MATE_THRESHOLD so a real mate is
+// always preferred to a TB win, but far above any normal eval. The per-ply term
+// (added by the caller) makes the engine deliver a TB win sooner / delay a TB
+// loss longer.
+inline constexpr int TB_WIN_SCORE   = MATE_THRESHOLD - MAX_PLY - 1;
+
 // TT entry flags — match the semantics of bagaturchess ITTEntry.
 enum TTFlag : std::int8_t {
     TT_NONE  = 0,
