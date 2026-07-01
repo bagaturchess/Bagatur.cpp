@@ -44,8 +44,10 @@ produces a single self-contained engine binary.
 
 - A C++20 compiler — GCC, Clang, or MSVC.
 - CMake ≥ 3.20.
-- An x86-64 CPU with **AVX2 + BMI2 + POPCNT** (Haswell / Excavator and newer) —
-  the default ISA target.
+- An x86-64 CPU with **AVX2 + FMA + BMI2 + POPCNT** — i.e. Intel Haswell (2013) /
+  AMD Excavator (2015) and newer. The shipped binary deliberately does **not**
+  use AVX-512, so it also runs on CPUs without it (all AMD Zen 1–3, Intel 12–14
+  gen consumer, etc.).
 
 **Build**
 
@@ -70,13 +72,25 @@ like (e.g. `-G Ninja`); CMake otherwise auto-selects one (Make / MSBuild).
 
 **Optimisation flags** (set by CMake in a Release build)
 
-- GCC / Clang: `-O3 -march=native -mbmi -mbmi2 -mpopcnt -fno-exceptions
-  -fno-rtti -fno-trapping-math -fno-math-errno`, plus LTO where supported.
+- GCC / Clang: `-O3 -march=haswell -mbmi -mbmi2 -mpopcnt -fno-exceptions
+  -fno-rtti -fno-trapping-math -fno-math-errno`, plus a fully static link
+  (`-static -static-libgcc -static-libstdc++`).
 - MSVC: `/O2 /Oi /Ot /GS- /GL /fp:fast /arch:AVX2 /LTCG`.
 
-`-march=native` tunes the binary to the **build machine's** CPU. Rebuild on the
-target host (or drop `-march=native`) if you ship to different hardware, or the
-engine may hit an illegal-instruction fault on an older CPU.
+The GCC/MinGW engine binary is tuned for **portable distribution**:
+
+- `-march=haswell` fixes the ISA at the AVX2/BMI2 floor — unlike `-march=native`
+  it never bakes in the build host's AVX-512, so the exe won't illegal-instruction
+  on the many CPUs without it.
+- The **static link** means the exe carries no MinGW runtime DLLs (`libstdc++-6`,
+  `libgcc_s_seh-1`, `libwinpthread-1`); a target box needs only the always-present
+  Windows system DLLs (`KERNEL32`, `msvcrt`).
+- **LTO is off on MinGW GCC** — that toolchain (GCC 8.1) miscompiles LTO + static
+  linking into a binary that crashes at startup, and a self-contained exe is worth
+  more than LTO's few percent here. A newer GCC (11+) can re-enable it.
+
+To trade portability for a faster local-only build, switch to `-march=native`,
+drop `-static`, and re-enable LTO.
 
 **AVX-512** — off by default (the NNUE uses an AVX2 path). Configure with
 `-DBAGATUR_AVX512=ON` to compile the AVX-512 NNUE path; the CPU must then

@@ -20,25 +20,30 @@ if (MSVC)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
     add_compile_options(-O3 -fno-exceptions -fno-rtti)
-    add_compile_options(-march=native -mbmi -mbmi2 -mpopcnt)
+    # Portable ISA floor: Haswell (2013) / AMD Excavator+ / Zen+ — AVX2 + FMA +
+    # BMI2 (pext for magic bitboards) + POPCNT, but NO AVX-512. `-march=native`
+    # bakes in whatever the BUILD machine happens to have (e.g. AVX-512 on a
+    # Tiger Lake box), which then faults with an illegal instruction on the many
+    # CPUs without it (all AMD Zen 1–3, Intel 12–14 gen consumer, anything pre
+    # ~2017). GCC 8.1 predates the `-march=x86-64-v3` alias, so `haswell` is the
+    # equivalent named floor.
+    add_compile_options(-march=haswell -mbmi -mbmi2 -mpopcnt)
     add_compile_options(-fno-trapping-math -fno-math-errno)
-    # LTO
+    # Statically link the C/C++/winpthread runtimes so the shipped exe needs no
+    # MinGW DLLs (libstdc++-6, libgcc_s_seh-1, libwinpthread-1) — a target box
+    # only needs the always-present Windows system DLLs (KERNEL32, msvcrt).
+    add_link_options(-static -static-libgcc -static-libstdc++)
+
+    # LTO is intentionally OFF on this GCC/MinGW toolchain. GCC 8.1's LTO
+    # miscompiles the statically-linked libstdc++/libgcc combination above: the
+    # binary corrupts and segfaults at startup (a spurious C++ throw during FEN
+    # parsing, unwinding through -fno-exceptions frames). A self-contained,
+    # portable exe (no MinGW DLLs) is worth more than LTO here, so LTO yields.
+    # Non-static builds may re-enable it; a newer GCC (11+) also fixes LTO+static.
     include(CheckIPOSupported)
     check_ipo_supported(RESULT lto_ok)
-    if (lto_ok)
+    if (lto_ok AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-        # GCC LTO needs the wrapper ar / ranlib to keep static archives
-        # readable by the LTO linker plugin. Plain `ar` silently drops the
-        # bytecode index, which surfaces later as "undefined reference" at
-        # the final link step.
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            find_program(GCC_AR_BIN     gcc-ar)
-            find_program(GCC_RANLIB_BIN gcc-ranlib)
-            if (GCC_AR_BIN AND GCC_RANLIB_BIN)
-                set(CMAKE_AR     "${GCC_AR_BIN}"     CACHE FILEPATH "GCC LTO-aware ar"     FORCE)
-                set(CMAKE_RANLIB "${GCC_RANLIB_BIN}" CACHE FILEPATH "GCC LTO-aware ranlib" FORCE)
-            endif()
-        endif()
     endif()
 endif()
 
