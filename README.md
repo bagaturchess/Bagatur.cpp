@@ -8,6 +8,7 @@ C++20 port of the [Bagatur chess engine](https://github.com/topce/Bagatur).
 | [src/nnue](src/nnue/README.md)     | `bagaturchess.nnue_v2` + `impl_nnue_v3.NNUEEvaluator`   |
 | [src/search](src/search/README.md) | `bagaturchess.search.impl.alg.impl1.Search_PVS_NWS`     |
 | [src/uci](src/uci/README.md)        | `bagaturchess.uci.impl` (UCI protocol driver)           |
+| [src/syzygy](src/syzygy/README.md) | `bagaturchess.egtb.syzygy` (Fathom tablebase prober)    |
 
 `network_bagatur.nnue` (project root) is **embedded into `Bagatur.cpp-x64`**
 at build time via `cmake/embed_binary.cmake`, so the UCI engine ships as a
@@ -16,6 +17,12 @@ helper binaries (`search_main`, `perft_eval`, `benchmark_eval`) do **not**
 embed it; they read `network_bagatur.nnue` from the current working directory
 at startup. If the network is absent at configure time, even the engine falls
 back to reading it from the working directory.
+
+Syzygy endgame tablebase support ([src/syzygy](src/syzygy/README.md)) is
+built in but **off by default** — the engine only probes once the `SyzygyPath`
+UCI option points at a directory of `.rtbw`/`.rtbz` files (a separate download).
+The prober itself (Fathom) is vendored in-tree, so the build stays
+dependency-free.
 
 ## Building
 
@@ -49,7 +56,7 @@ like (e.g. `-G Ninja`); CMake otherwise auto-selects one (Make / MSBuild).
 | `search_main`                         | exe  | CLI search driver (reads `network_bagatur.nnue` from CWD) |
 | `perft` / `perft_eval`                | exe  | move-generation / evaluation perft correctness         |
 | `benchmark` / `benchmark_eval`        | exe  | speed benchmarks                                       |
-| `bagatur` / `nnue` / `search` / `uci` | lib  | static libraries the executables link                  |
+| `bagatur` / `nnue` / `syzygy` / `search` / `uci` | lib | static libraries the executables link            |
 
 **Optimisation flags** (set by CMake in a Release build)
 
