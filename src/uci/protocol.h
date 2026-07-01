@@ -5,7 +5,7 @@
 namespace uci {
 
 inline constexpr const char* ENGINE_NAME    = "Bagatur.cpp";
-inline constexpr const char* ENGINE_VERSION = "0.1";
+inline constexpr const char* ENGINE_VERSION = "1.0";
 inline constexpr const char* ENGINE_AUTHOR  = "Krasimir Topchiyski (Java original) / C++ port";
 
 // Commands from GUI → engine.

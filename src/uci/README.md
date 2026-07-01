@@ -141,10 +141,10 @@ The `max` for `ThreadsCount` is `2 × std::thread::hardware_concurrency()`.
 
 ## Network — embedded, not loaded from disk
 
-The NNUE network (`network_bagatur.nnue`, ~16 MB) is linked **into**
-`Bagatur.cpp-x64.exe` at build time via `cmake/embed_binary.cmake`. The
-exe is fully self-contained: drop it into cutechess / Arena / ChessBase
-without any companion files, and the working directory does not matter.
+The NNUE network (`network_bagatur.nnue`, ~16 MB) is linked **into** the engine
+exe at build time via `cmake/embed_binary.cmake`. The exe is fully
+self-contained: drop it into cutechess / Arena / ChessBase without any companion
+files, and the working directory does not matter.
 
 The CMake block that drives this is the only thing you need to touch if
 you want to swap networks:
@@ -168,8 +168,9 @@ cmake -B build -G Ninja
 cmake --build build --target Bagatur.cpp-x64 --config Release
 ```
 
-The resulting `build/Bagatur.cpp-x64.exe` (or `.../Bagatur.cpp-x64` on
-POSIX) is the only artifact you need to ship.
+The CMake target is `Bagatur.cpp-x64`, but the produced file carries the version
++ ISA + arch: `build/Bagatur.cpp_1.0-x86_64-avx2.exe` (no `.exe` on POSIX) — the
+only artifact you need to ship.
 
 ## Smoke test
 
@@ -195,7 +196,7 @@ quit
 
 ```bash
 cutechess-cli \
-  -engine cmd=./Bagatur.cpp-x64 name=Bagatur.cpp \
+  -engine cmd=./Bagatur.cpp_1.0-x86_64-avx2 name=Bagatur.cpp \
   -engine cmd=./bagatur.jar      name=BagaturJava proto=uci \
   -each tc=40/60+0.6 \
   -games 100 -concurrency 4 \

@@ -168,6 +168,13 @@ if (NOT MSVC)
     target_link_libraries(Bagatur.cpp-x64 PRIVATE pthread)
 endif()
 
+# Distributable filename carries version + ISA level + arch. The CMake TARGET
+# stays `Bagatur.cpp-x64` (so `--target Bagatur.cpp-x64` and the docs keep
+# working); only the produced file is renamed. The `-avx2` tag flags the ISA
+# floor — the build is `-march=haswell` (AVX2/FMA/BMI2), no AVX-512.
+set_target_properties(Bagatur.cpp-x64 PROPERTIES
+    OUTPUT_NAME "Bagatur.cpp_1.0-x86_64-avx2")
+
 if (BAGATUR_HAS_EMBEDDED_NETWORK)
     # Add the generated TU to the executable's own sources. Avoids the
     # static-library scan-order issue where the symbols would be discarded
