@@ -2,6 +2,16 @@
 
 C++20 port of the [Bagatur chess engine](https://github.com/topce/Bagatur).
 
+The project has two goals:
+
+1. **Compare Java and C++ performance.** The C++ port runs at almost **2× the
+   NPS** of the Java engine and is roughly **25 Elo stronger**.
+2. **Showcase, in C++, the two things that make Bagatur's search distinctive:**
+   an [MTD(f) root search](src/search/README.md#mtdf-γ-stepping) in place of
+   classic PVS, and a
+   [consensus-based Lazy SMP](src/search/README.md#smp--lazy-smp) search in which
+   the worker threads *vote* to decide the best move for a position.
+
 | Component                          | Mirrors Java                                            |
 | ---------------------------------- | ------------------------------------------------------- |
 | [src/board](src/board/README.md)   | `bagaturchess.bitboard.impl1` (board + move generation) |
