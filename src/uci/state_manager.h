@@ -64,9 +64,11 @@ private:
     std::unique_ptr<search::Searcher>           searcher_;   // used when ThreadsCount == 1
     std::unique_ptr<search::smp::SMPSearcher>   smp_;         // used when ThreadsCount  > 1
 
-    int  threads_count_ = 1;     // UCI option ThreadsCount
-    int  tt_size_mb_    = 512;    // UCI option TTSize (MB)
-    bool frc960_        = false;  // UCI option UCI_Chess960 (king-takes-rook notation)
+    static constexpr int kDefaultTTSizeMb = 1024;  // TTSize UCI option default
+
+    int  threads_count_ = 1;                 // UCI option ThreadsCount
+    int  tt_size_mb_    = kDefaultTTSizeMb;  // UCI option TTSize (MB)
+    bool frc960_        = false;             // UCI option UCI_Chess960 (king-takes-rook notation)
 
     std::thread       search_thread_;
     std::atomic<bool> search_running_{false};

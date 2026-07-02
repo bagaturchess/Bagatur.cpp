@@ -134,7 +134,7 @@ table out from under the worker threads).
 | Option         | Type  | Default | Range             | Effect |
 | -------------- | ----- | ------- | ----------------- | ------ |
 | `ThreadsCount` | spin  | 1       | 1 … 2×CPU-cores   | SMP worker count. Applied on the next `go` (1 → single `Searcher`; > 1 → `SMPSearcher`, recreated when the count changes). |
-| `TTSize`       | spin  | 512     | 1 … 65536 (MB)    | Shared transposition-table size. Resized immediately. |
+| `TTSize`       | spin  | 1024    | 1 … 65536 (MB)    | Shared transposition-table size. Resized immediately. |
 | `UCI_Chess960` | check | false   | true / false      | Chess960 castling I/O. When `true`, castling is read and written as king-takes-rook (`e1h1`) instead of the classic king-target (`e1g1`) — see [Chess960 castling notation](#chess960-castling-notation). Board mechanics are FRC-capable regardless; this only switches the notation. |
 
 The `max` for `ThreadsCount` is `2 × std::thread::hardware_concurrency()`.

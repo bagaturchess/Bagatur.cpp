@@ -159,7 +159,7 @@ void StateManager::send_id_and_uciok() const {
     send(idn);
     send(std::string(REPLY_ID_AUTHOR) + " " + ENGINE_AUTHOR);
     send("option name ThreadsCount type spin default 1 min 1 max " + std::to_string(max_threads()));
-    send("option name TTSize type spin default 512 min 1 max 65536");
+    send("option name TTSize type spin default " + std::to_string(kDefaultTTSizeMb) + " min 1 max 65536");
     send("option name UCI_Chess960 type check default false");
     send("option name SyzygyPath type string default <empty>");
     send(REPLY_UCIOK);
@@ -239,11 +239,11 @@ void StateManager::cmd_position(const std::string& line) {
     }
 
     // Board pointer changed. Re-bind the searcher and refresh NNUE
-    // accumulators, but KEEP the searcher alive — its TT (512 MB) and
-    // eval cache (128 MB) are expensive to allocate and carry useful
-    // info across moves. Dropping them on every `position` command makes
+    // accumulators, but KEEP the searcher alive — its TT (1024 MB by
+    // default) and eval cache (128 MB) are expensive to allocate and carry
+    // useful info across moves. Dropping them on every `position` command makes
     // NPS collapse ~10× under a GUI like Arena because every move pays
-    // the 640 MB allocation again and starts from a cold TT.
+    // the ~1.1 GB allocation again and starts from a cold TT.
     if (searcher_) searcher_->set_board(*board_);
     if (smp_)      smp_->set_board(*board_);
 }
