@@ -163,6 +163,9 @@ void StateManager::send_id_and_uciok() const {
     send("option name UCI_Chess960 type check default false");
     send("option name SyzygyPath type string default <empty>");
     send(REPLY_UCIOK);
+    // Report which SIMD kernel set the CPU selected (AVX-512 / AVX2 / scalar).
+    // After uciok so it never precedes the mandatory `id` / `uciok` handshake.
+    send(std::string("info string NNUE SIMD: ") + nnue::active_simd_name());
 }
 
 void StateManager::send_readyok() const {

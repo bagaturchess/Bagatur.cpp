@@ -79,21 +79,26 @@ MSBuild).
   (`-static -static-libgcc -static-libstdc++`).
 - MSVC: `/O2 /Oi /Ot /GS- /GL /fp:fast /arch:AVX2 /LTCG`.
 
-The GCC/MinGW engine binary is tuned for **portable distribution**:
+The GCC/MinGW engine binary is tuned for **portable distribution** — one file
+that runs everywhere yet still uses AVX-512 where the CPU has it:
 
-- `-march=haswell` fixes the ISA at the AVX2/BMI2 floor — unlike `-march=native`
-  it never bakes in the build host's AVX-512, so the exe won't illegal-instruction
-  on the many CPUs without it.
+- `-march=haswell` fixes the *general* code at the AVX2/BMI2 floor — unlike
+  `-march=native` it never bakes in the build host's AVX-512, so the exe won't
+  illegal-instruction on the many CPUs without it.
+- The **NNUE hot loops dispatch at runtime**: the binary ships AVX-512, AVX2 and
+  scalar kernels and picks the fastest the running CPU supports via CPUID, so the
+  single portable exe still gets the AVX-512 speed-up (~15–20 % NPS) on capable
+  hardware — no separate `-avx512` build. It prints the choice once after `uciok`
+  (`info string NNUE SIMD: AVX-512`); force one with `BAGATUR_SIMD=avx2|scalar`.
+  See [src/nnue](src/nnue/README.md#simd--runtime-cpu-dispatch).
 - The **static link** means the exe carries no MinGW runtime DLLs (`libstdc++-6`,
-  `libgcc_s_seh-1`, `libwinpthread-1`); a target box needs only the always-present
-  Windows system DLLs (`KERNEL32`, `msvcrt`).
-- **LTO is off on MinGW GCC** — that toolchain (GCC 8.1) miscompiles LTO + static
-  linking into a binary that crashes at startup, and a self-contained exe is worth
-  more than LTO's few percent here. A newer GCC (11+) can re-enable it.
+  `libgcc_s_seh-1`, `libwinpthread-1`); a target box needs only always-present
+  Windows system DLLs (`KERNEL32` and the UCRT `api-ms-win-crt-*`, built into
+  Windows 10+).
+- **LTO is on**, built with the winlibs GCC 16 UCRT toolchain, which handles
+  LTO + static linking soundly (the older GCC 8.1 did not). Toggle with
+  `-DBAGATUR_LTO=OFF`.
 
-To trade portability for a faster local-only build, switch to `-march=native`,
-drop `-static`, and re-enable LTO.
-
-**AVX-512** — off by default (the NNUE uses an AVX2 path). Configure with
-`-DBAGATUR_AVX512=ON` to compile the AVX-512 NNUE path; the CPU must then
-support AVX512F + AVX512BW (Skylake-X / Ice Lake / Zen 4+).
+To tune the *general* code for this machine as well, add `-DBAGATUR_MARCH=native`
+(faster search / movegen, but the result is no longer portable — never distribute
+it). The NNUE already uses AVX-512 at runtime without it.

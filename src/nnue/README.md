@@ -6,12 +6,16 @@ mostly Java Vector API SIMD code).
 
 ## What's in here
 
-| File                  | Purpose                                                |
-| --------------------- | ------------------------------------------------------ |
-| `nnue.h`              | Public `Evaluator`, `Network`, `Accumulator` API       |
-| `nnue.cpp`            | AVX2 hot path: L1 add/sub/add-sub, SCReLU + L2 dot     |
-| `perft_eval.cpp`      | Perft that runs `evaluate()` at every node (correctness + NPS) |
-| `benchmark_eval.cpp`  | NPS benchmark on a mix of mid-game positions           |
+| File                        | Purpose                                                |
+| --------------------------- | ------------------------------------------------------ |
+| `nnue.h`                    | Public `Evaluator`, `Network`, `Accumulator` API       |
+| `nnue.cpp`                  | Evaluator: refresh, incremental update, `evaluate()`; calls the SIMD kernels via function pointers |
+| `nnue_kernels.h`            | `Kernels` dispatch table + `active()` (CPUID) selector |
+| `nnue_kernels_avx512.cpp`   | AVX-512F+BW kernels (L1 add/sub/add-sub, SCReLU+L2 dot) |
+| `nnue_kernels_avx2.cpp`     | AVX2 kernels — the shipped floor                       |
+| `nnue_kernels_scalar.cpp`   | Scalar kernels + the runtime CPU dispatcher            |
+| `perft_eval.cpp`            | Perft that runs `evaluate()` at every node (correctness + NPS) |
+| `benchmark_eval.cpp`        | NPS benchmark on a mix of mid-game positions           |
 
 ## Network architecture (matches `nnue_v2.NNUE` 1:1)
 
@@ -57,45 +61,52 @@ Incremental updates are mandatory for any kind of perf:
 - Castling / EP / king crosses input-bucket boundary → full refresh, with a
   6 KB accumulator snapshot saved for `after_unmake`.
 
-## SIMD
+## SIMD — runtime CPU dispatch
 
-Three hot-path implementations are present in `nnue.cpp`; the build picks one
-at compile time based on the standard `__AVX512BW__` / `__AVX2__` predefines:
+The four hot-path primitives — accumulator `v_add` / `v_sub` / `v_add_sub` and the
+SCReLU + L2 `v_screlu_dot` — ship in **three per-ISA translation units**, and the
+engine selects the fastest the running CPU supports **at startup via CPUID**
+(`nnue::kernels::active`). One distributable binary therefore runs on any x86-64
+machine yet still uses AVX-512 where present — no per-ISA builds, no `SIGILL`.
 
-| ISA      | Lane width | When chosen                                  |
-| -------- | :--------: | -------------------------------------------- |
-| AVX-512  | 32 int16   | `__AVX512F__` + `__AVX512BW__` defined       |
-| AVX-2    | 16 int16   | `__AVX2__` defined                           |
-| scalar   | 1          | neither — portable fallback for verification |
+| File                      | ISA     | Lane width | Selected when …                          |
+| ------------------------- | ------- | :--------: | ---------------------------------------- |
+| `nnue_kernels_avx512.cpp` | AVX-512 | 32 int16   | CPU has AVX-512F + AVX-512BW (OS-enabled) |
+| `nnue_kernels_avx2.cpp`   | AVX2    | 16 int16   | CPU has AVX2 — the shipped floor          |
+| `nnue_kernels_scalar.cpp` | scalar  | 1          | neither — portable reference              |
 
-The L1 add/sub/add-sub kernels process 64 (AVX2) or 128 (AVX-512) lanes per
-loop iteration. The SCReLU + L2 dot kernel widens int16 → int32 via the
-respective `cvtepi16_epi32`, squares with `mullo_epi32`, and multiply-
-accumulates against int32 weights. The AVX-512 path uses `_mm512_reduce_add_epi32`
-for the horizontal sum.
+Each kernel is built at its own ISA level (per-file `COMPILE_OPTIONS` in
+CMakeLists) **and** carries a `target()` attribute so the ISA survives LTO (the
+command-line `-mavx512*` flags alone are not preserved across the link-time
+recompile). `nnue.cpp` calls the selected set through function pointers; because
+every primitive sweeps the full 1536-lane hidden layer, the single indirect call
+per primitive is amortized to noise.
 
-### Enabling AVX-512
+The L1 add/sub/add-sub kernels process 64 (AVX2) or 128 (AVX-512) lanes per loop
+iteration. The SCReLU + L2 dot kernel widens int16 → int32 via the respective
+`cvtepi16_epi32`, squares with `mullo_epi32`, and multiply-accumulates against
+int32 weights; the AVX-512 path reduces with `_mm512_reduce_add_epi32`.
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBAGATUR_AVX512=ON
-cmake --build build -j
+### Which path am I on?
+
+The engine prints the selected set once after `uciok`:
+
+```text
+info string NNUE SIMD: AVX-512
 ```
 
-Or directly with g++:
+To force a path — to exercise all three in one binary, or as a fallback if a host
+mis-detects — set an environment variable before launching (`avx512`/`avx2` trust
+the caller; forcing an ISA the CPU lacks faults exactly like a native build):
 
 ```bash
-g++ -std=c++17 -O3 -march=native -mavx512f -mavx512bw -mavx2 -mfma -flto ...
+BAGATUR_SIMD=avx2 ./Bagatur.cpp_1.0-x86_64-avx2
 ```
 
-**Caveat:** an AVX-512 build crashes with `SIGILL` if executed on a CPU that
-does not implement AVX-512F + AVX-512BW. Target CPUs:
-
-- AMD Zen 4 / Zen 5 (Ryzen 7000 / 9000)
-- Intel server: Skylake-X, Cascade Lake, Ice Lake-SP, Sapphire Rapids
-- Intel desktop: Ice Lake / Tiger Lake mobile; **disabled on Alder/Raptor Lake**
-
-For mixed deployments, leave `BAGATUR_AVX512=OFF` (default) — the AVX2 path
-runs on everything from Intel Haswell (2013) / AMD Excavator (2015) onwards.
+Measured on an AVX-512 host, the AVX-512 kernel runs ~15–20 % more NPS than AVX2
+on the same search tree; on a CPU without AVX-512 the AVX2 path is chosen
+automatically and runs on everything from Intel Haswell (2013) / AMD Excavator
+(2015) onward.
 
 ## Building
 
@@ -110,12 +121,20 @@ cp <wherever-you-keep>/network_bagatur.nnue build/Release/
 ./build/Release/benchmark_eval
 ```
 
-Or directly with g++:
+Or directly with g++ — the two SIMD kernels compile at their own ISA (each also
+carries a `target()` attribute, so this stays correct under `-flto`); everything
+else stays at the portable floor:
 
 ```bash
-g++ -std=c++17 -O3 -march=native -mavx2 -flto \
+g++ -std=c++20 -O3 -march=haswell -mavx512f -mavx512bw -mavx2 -mfma -flto \
+    -c src/nnue/nnue_kernels_avx512.cpp -o k_avx512.o
+g++ -std=c++20 -O3 -march=haswell -mavx2 -mfma -flto \
+    -c src/nnue/nnue_kernels_avx2.cpp -o k_avx2.o
+g++ -std=c++20 -O3 -march=haswell -flto \
+    -c src/nnue/nnue_kernels_scalar.cpp -o k_scalar.o
+g++ -std=c++20 -O3 -march=haswell -flto \
     src/board/*.cpp src/nnue/nnue.cpp src/nnue/perft_eval.cpp \
-    -o perft_eval
+    k_avx512.o k_avx2.o k_scalar.o -o perft_eval
 ```
 
 ## Measured throughput

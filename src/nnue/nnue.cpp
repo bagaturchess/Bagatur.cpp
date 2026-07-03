@@ -1,12 +1,13 @@
 // nnue.cpp — implementation of the Bullet-style NNUE evaluator.
 //
-// The hot loops have three implementations:
-//   - AVX-512 (32 int16 lanes per vector) — fastest, requires AVX512F + BW
-//   - AVX2    (16 int16 lanes per vector) — default x86-64 path
-//   - scalar                              — portable fallback for verification
-// Selection is compile-time, driven by the standard `__AVX512BW__` / `__AVX2__`
-// preprocessor macros set by the compiler when the corresponding target flag
-// is on.
+// The hot loops (accumulator add/sub and the SCReLU + dot output pass) have
+// three implementations, one per file:
+//   - AVX-512 (32 int16 lanes/vector) — nnue_kernels_avx512.cpp, fastest
+//   - AVX2    (16 int16 lanes/vector) — nnue_kernels_avx2.cpp,   portable floor
+//   - scalar                          — nnue_kernels_scalar.cpp, fallback/ref
+// Selection is at RUNTIME by CPUID (nnue::kernels::active), so one distributable
+// binary runs on any x86-64 CPU yet still uses AVX-512 where the host has it.
+// This file calls the chosen set through function pointers.
 
 #include "nnue.h"
 
@@ -23,14 +24,7 @@
 #include "../board/bitboard.h"
 #include "../board/move_util.h"
 #include "../board/types.h"
-
-#if defined(__AVX512BW__) && defined(__AVX512F__)
-#  include <immintrin.h>
-#  define NNUE_HAVE_AVX512 1
-#elif defined(__AVX2__)
-#  include <immintrin.h>
-#  define NNUE_HAVE_AVX2 1
-#endif
+#include "nnue_kernels.h"  // runtime-dispatched SIMD primitives (AVX-512/AVX2/scalar)
 
 namespace nnue {
 
@@ -190,7 +184,7 @@ void EvalCache::clear() noexcept {
 }
 
 // ----------------------------------------------------------------------------
-// Vectorised L1 add / sub helpers
+// L1 add / sub helpers — thin wrappers over the runtime-selected SIMD kernels
 // ----------------------------------------------------------------------------
 namespace {
 
@@ -198,229 +192,29 @@ inline int l1_offset(int feature_index, int bucket_index) noexcept {
     return (feature_index + bucket_index * FEATURE_SIZE) * HIDDEN_SIZE;
 }
 
-#if defined(NNUE_HAVE_AVX512)
-
-// AVX-512 path: 32 int16 lanes per __m512i. Hidden layer = 1536 = 48 vectors,
-// unrolled 4× per loop iteration (= 128 lanes per iter, 12 outer iterations).
-inline void v_add(std::int16_t* __restrict v, const std::int16_t* __restrict w) {
-    for (int i = 0; i < HIDDEN_SIZE; i += 32 * 4) {
-        __m512i v0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i));
-        __m512i v1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 32));
-        __m512i v2 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 64));
-        __m512i v3 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 96));
-        v0 = _mm512_add_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i)));
-        v1 = _mm512_add_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 32)));
-        v2 = _mm512_add_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 64)));
-        v3 = _mm512_add_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 96)));
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i),      v0);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 32), v1);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 64), v2);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 96), v3);
-    }
-}
-
-inline void v_sub(std::int16_t* __restrict v, const std::int16_t* __restrict w) {
-    for (int i = 0; i < HIDDEN_SIZE; i += 32 * 4) {
-        __m512i v0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i));
-        __m512i v1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 32));
-        __m512i v2 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 64));
-        __m512i v3 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 96));
-        v0 = _mm512_sub_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i)));
-        v1 = _mm512_sub_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 32)));
-        v2 = _mm512_sub_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 64)));
-        v3 = _mm512_sub_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w + i + 96)));
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i),      v0);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 32), v1);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 64), v2);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 96), v3);
-    }
-}
-
-inline void v_add_sub(std::int16_t* __restrict v,
-                      const std::int16_t* __restrict w_add,
-                      const std::int16_t* __restrict w_sub) {
-    for (int i = 0; i < HIDDEN_SIZE; i += 32 * 4) {
-        __m512i v0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i));
-        __m512i v1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 32));
-        __m512i v2 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 64));
-        __m512i v3 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(v + i + 96));
-        v0 = _mm512_add_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i)));
-        v1 = _mm512_add_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i + 32)));
-        v2 = _mm512_add_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i + 64)));
-        v3 = _mm512_add_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_add + i + 96)));
-        v0 = _mm512_sub_epi16(v0, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i)));
-        v1 = _mm512_sub_epi16(v1, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i + 32)));
-        v2 = _mm512_sub_epi16(v2, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i + 64)));
-        v3 = _mm512_sub_epi16(v3, _mm512_loadu_si512(reinterpret_cast<const __m512i*>(w_sub + i + 96)));
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i),      v0);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 32), v1);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 64), v2);
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(v + i + 96), v3);
-    }
-}
-
-// SCReLU + dot. 32 int16 lanes per outer step; widened into 2×16 int32 lanes
-// for the squared/weighted accumulation.
-inline std::int64_t v_screlu_dot(const std::int16_t* __restrict acc,
-                                 const std::int32_t* __restrict weights) {
-    const __m512i lo  = _mm512_setzero_si512();
-    const __m512i hi  = _mm512_set1_epi16(static_cast<std::int16_t>(QA));
-
-    __m512i s0 = _mm512_setzero_si512();
-    __m512i s1 = _mm512_setzero_si512();
-
-    for (int i = 0; i < HIDDEN_SIZE; i += 32) {
-        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(acc + i));
-        v = _mm512_max_epi16(v, lo);
-        v = _mm512_min_epi16(v, hi);
-
-        __m256i v_lo = _mm512_castsi512_si256(v);
-        __m256i v_hi = _mm512_extracti64x4_epi64(v, 1);
-        __m512i a0   = _mm512_cvtepi16_epi32(v_lo);
-        __m512i a1   = _mm512_cvtepi16_epi32(v_hi);
-
-        __m512i sq0 = _mm512_mullo_epi32(a0, a0);
-        __m512i sq1 = _mm512_mullo_epi32(a1, a1);
-
-        __m512i w0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(weights + i));
-        __m512i w1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(weights + i + 16));
-
-        s0 = _mm512_add_epi32(s0, _mm512_mullo_epi32(sq0, w0));
-        s1 = _mm512_add_epi32(s1, _mm512_mullo_epi32(sq1, w1));
-    }
-
-    __m512i s = _mm512_add_epi32(s0, s1);
-    return static_cast<std::int64_t>(_mm512_reduce_add_epi32(s));
-}
-
-#elif defined(NNUE_HAVE_AVX2)
-
-// All three primitives operate on 16-lane int16 vectors (256-bit). The hidden
-// layer is 1536 elements = 96 vectors, unrolled 4× per loop iteration.
-inline void v_add(std::int16_t* __restrict v, const std::int16_t* __restrict w) {
-    for (int i = 0; i < HIDDEN_SIZE; i += 16 * 4) {
-        __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i));
-        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 16));
-        __m256i v2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 32));
-        __m256i v3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 48));
-        v0 = _mm256_add_epi16(v0, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i)));
-        v1 = _mm256_add_epi16(v1, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i + 16)));
-        v2 = _mm256_add_epi16(v2, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i + 32)));
-        v3 = _mm256_add_epi16(v3, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i + 48)));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i),       v0);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 16),  v1);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 32),  v2);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 48),  v3);
-    }
-}
-
-inline void v_sub(std::int16_t* __restrict v, const std::int16_t* __restrict w) {
-    for (int i = 0; i < HIDDEN_SIZE; i += 16 * 4) {
-        __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i));
-        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 16));
-        __m256i v2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 32));
-        __m256i v3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 48));
-        v0 = _mm256_sub_epi16(v0, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i)));
-        v1 = _mm256_sub_epi16(v1, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i + 16)));
-        v2 = _mm256_sub_epi16(v2, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i + 32)));
-        v3 = _mm256_sub_epi16(v3, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + i + 48)));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i),       v0);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 16),  v1);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 32),  v2);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 48),  v3);
-    }
-}
-
-inline void v_add_sub(std::int16_t* __restrict v,
-                      const std::int16_t* __restrict w_add,
-                      const std::int16_t* __restrict w_sub) {
-    for (int i = 0; i < HIDDEN_SIZE; i += 16 * 4) {
-        __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i));
-        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 16));
-        __m256i v2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 32));
-        __m256i v3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + i + 48));
-        v0 = _mm256_add_epi16(v0, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_add + i)));
-        v1 = _mm256_add_epi16(v1, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_add + i + 16)));
-        v2 = _mm256_add_epi16(v2, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_add + i + 32)));
-        v3 = _mm256_add_epi16(v3, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_add + i + 48)));
-        v0 = _mm256_sub_epi16(v0, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_sub + i)));
-        v1 = _mm256_sub_epi16(v1, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_sub + i + 16)));
-        v2 = _mm256_sub_epi16(v2, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_sub + i + 32)));
-        v3 = _mm256_sub_epi16(v3, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w_sub + i + 48)));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i),       v0);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 16),  v1);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 32),  v2);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + i + 48),  v3);
-    }
-}
-
-// SCReLU + dot product. Returns the sum across HIDDEN_SIZE for one accumulator.
-inline std::int64_t v_screlu_dot(const std::int16_t* __restrict acc,
-                                 const std::int32_t* __restrict weights) {
-    const __m256i lo  = _mm256_setzero_si256();
-    const __m256i hi  = _mm256_set1_epi16(static_cast<std::int16_t>(QA));
-
-    __m256i s0 = _mm256_setzero_si256();
-    __m256i s1 = _mm256_setzero_si256();
-
-    for (int i = 0; i < HIDDEN_SIZE; i += 16) {
-        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc + i));
-        v = _mm256_max_epi16(v, lo);
-        v = _mm256_min_epi16(v, hi);
-
-        // Widen int16 -> int32 in two halves.
-        __m128i v_lo = _mm256_castsi256_si128(v);
-        __m128i v_hi = _mm256_extracti128_si256(v, 1);
-        __m256i a0   = _mm256_cvtepi16_epi32(v_lo);
-        __m256i a1   = _mm256_cvtepi16_epi32(v_hi);
-
-        // Square (max 255^2 = 65025, fits in int32).
-        __m256i sq0 = _mm256_mullo_epi32(a0, a0);
-        __m256i sq1 = _mm256_mullo_epi32(a1, a1);
-
-        __m256i w0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + i));
-        __m256i w1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + i + 8));
-
-        s0 = _mm256_add_epi32(s0, _mm256_mullo_epi32(sq0, w0));
-        s1 = _mm256_add_epi32(s1, _mm256_mullo_epi32(sq1, w1));
-    }
-
-    __m256i s = _mm256_add_epi32(s0, s1);
-
-    // Horizontal reduce to int64 to avoid int32 overflow if the network grows.
-    std::int32_t tmp[8];
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(tmp), s);
-    std::int64_t total = 0;
-    for (int k = 0; k < 8; ++k) total += tmp[k];
-    return total;
-}
-
-#else  // no SIMD path enabled — scalar fallback
+// The active SIMD kernel set (AVX-512 / AVX2 / scalar), chosen once by CPUID at
+// static-init time. Each primitive sweeps the whole HIDDEN_SIZE lane array, so
+// dispatching through a function pointer costs one indirect call amortized over
+// 1536 lanes — negligible — while keeping the binary portable. See nnue_kernels.h.
+const kernels::Kernels g_kernels = kernels::active();
 
 inline void v_add(std::int16_t* v, const std::int16_t* w) {
-    for (int i = 0; i < HIDDEN_SIZE; ++i) v[i] = static_cast<std::int16_t>(v[i] + w[i]);
+    g_kernels.v_add(v, w);
 }
 inline void v_sub(std::int16_t* v, const std::int16_t* w) {
-    for (int i = 0; i < HIDDEN_SIZE; ++i) v[i] = static_cast<std::int16_t>(v[i] - w[i]);
+    g_kernels.v_sub(v, w);
 }
-inline void v_add_sub(std::int16_t* v, const std::int16_t* a, const std::int16_t* s) {
-    for (int i = 0; i < HIDDEN_SIZE; ++i)
-        v[i] = static_cast<std::int16_t>(v[i] + a[i] - s[i]);
+inline void v_add_sub(std::int16_t* v, const std::int16_t* w_add, const std::int16_t* w_sub) {
+    g_kernels.v_add_sub(v, w_add, w_sub);
 }
 inline std::int64_t v_screlu_dot(const std::int16_t* acc, const std::int32_t* weights) {
-    std::int64_t s = 0;
-    for (int i = 0; i < HIDDEN_SIZE; ++i) {
-        int v = acc[i];
-        if (v < 0) v = 0;
-        else if (v > QA) v = QA;
-        s += static_cast<std::int64_t>(v) * v * weights[i];
-    }
-    return s;
+    return g_kernels.v_screlu_dot(acc, weights);
 }
 
-#endif
-
 }  // anonymous
+
+// Name of the SIMD kernel set the running CPU selected (for the startup banner).
+const char* active_simd_name() { return g_kernels.name; }
 
 // ----------------------------------------------------------------------------
 // Evaluator implementation

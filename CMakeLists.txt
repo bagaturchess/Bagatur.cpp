@@ -20,30 +20,55 @@ if (MSVC)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
     add_compile_options(-O3 -fno-exceptions -fno-rtti)
-    # Portable ISA floor: Haswell (2013) / AMD Excavator+ / Zen+ — AVX2 + FMA +
-    # BMI2 (pext for magic bitboards) + POPCNT, but NO AVX-512. `-march=native`
-    # bakes in whatever the BUILD machine happens to have (e.g. AVX-512 on a
-    # Tiger Lake box), which then faults with an illegal instruction on the many
-    # CPUs without it (all AMD Zen 1–3, Intel 12–14 gen consumer, anything pre
-    # ~2017). GCC 8.1 predates the `-march=x86-64-v3` alias, so `haswell` is the
-    # equivalent named floor.
-    add_compile_options(-march=haswell -mbmi -mbmi2 -mpopcnt)
+    # ISA target for the general (non-NNUE) code. Default `haswell` (2013) /
+    # AMD Excavator+ / Zen+ — AVX2 + FMA + BMI2 (pext for magic bitboards) +
+    # POPCNT, but NO AVX-512 — the portable floor for the SHIPPED binary. GCC 8.1
+    # predates the `-march=x86-64-v3` alias, so `haswell` is the equivalent floor.
+    #
+    # NOTE: the NNUE hot loops do NOT depend on this — they ship as separate
+    # per-ISA kernels and pick AVX-512 at RUNTIME on capable CPUs (see the nnue
+    # lib below), so the default haswell binary is already portable AND fast.
+    #
+    # `-DBAGATUR_MARCH=native` is only an optional private tweak: it lets the
+    # compiler use host extensions + tuning for the SEARCH / MOVEGEN code too. It
+    # then FAULTS with an illegal instruction on any CPU lacking those extensions
+    # — never distribute a native build.
+    set(BAGATUR_MARCH "haswell" CACHE STRING
+        "ISA for -march on general code: 'haswell' = portable floor (ship this); 'native' = fastest on THIS host, not portable")
+    add_compile_options(-march=${BAGATUR_MARCH} -mbmi -mbmi2 -mpopcnt)
     add_compile_options(-fno-trapping-math -fno-math-errno)
     # Statically link the C/C++/winpthread runtimes so the shipped exe needs no
     # MinGW DLLs (libstdc++-6, libgcc_s_seh-1, libwinpthread-1) — a target box
     # only needs the always-present Windows system DLLs (KERNEL32, msvcrt).
     add_link_options(-static -static-libgcc -static-libstdc++)
 
-    # LTO is intentionally OFF on this GCC/MinGW toolchain. GCC 8.1's LTO
-    # miscompiles the statically-linked libstdc++/libgcc combination above: the
-    # binary corrupts and segfaults at startup (a spurious C++ throw during FEN
-    # parsing, unwinding through -fno-exceptions frames). A self-contained,
-    # portable exe (no MinGW DLLs) is worth more than LTO here, so LTO yields.
-    # Non-static builds may re-enable it; a newer GCC (11+) also fixes LTO+static.
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT lto_ok)
-    if (lto_ok AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    # LTO. Requires a GCC where LTO + static linking is sound: GCC 8.1
+    # miscompiled that combination into a startup crash, but a modern MinGW GCC
+    # (11+, e.g. the winlibs GCC 16 UCRT toolchain) handles it. gcc-ar /
+    # gcc-ranlib keep the LTO bytecode index inside the static archives — plain
+    # `ar` silently drops it, which later surfaces as "undefined reference" at
+    # the final link step.
+    #
+    # Measured on this port, LTO buys little for the hot loops (the NNUE SIMD
+    # kernels are already isolated TUs reached via function pointer) — the big NPS
+    # lever is the ISA of the NNUE kernel (AVX-512 vs AVX2, now runtime-selected),
+    # not LTO. Kept ON by default but toggleable so the distribution build can be
+    # reproduced or A/B'd without editing this file.
+    option(BAGATUR_LTO "Enable link-time optimization (needs GCC 11+ for sound static+LTO)" ON)
+    if (BAGATUR_LTO)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT lto_ok)
+        if (lto_ok)
+            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+            if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+                find_program(GCC_AR_BIN     gcc-ar)
+                find_program(GCC_RANLIB_BIN gcc-ranlib)
+                if (GCC_AR_BIN AND GCC_RANLIB_BIN)
+                    set(CMAKE_AR     "${GCC_AR_BIN}"     CACHE FILEPATH "GCC LTO-aware ar"     FORCE)
+                    set(CMAKE_RANLIB "${GCC_RANLIB_BIN}" CACHE FILEPATH "GCC LTO-aware ranlib" FORCE)
+                endif()
+            endif()
+        endif()
     endif()
 endif()
 
@@ -62,17 +87,34 @@ add_library(bagatur STATIC
 target_include_directories(bagatur PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
 # ------------------------------------------------------------------ nnue lib
-# Compile-time SIMD target:
-#   default          -> AVX2 (Haswell / Excavator and newer)
-#   -DBAGATUR_AVX512 -> AVX-512F + AVX-512BW (Skylake-X / Ice Lake / Zen 4+)
-# Built binaries crash with illegal-instruction if run on a CPU that does not
-# implement the selected ISA. Pick the lowest common denominator across your
-# deployment targets.
-option(BAGATUR_AVX512 "Compile NNUE with AVX-512 path (CPU must support AVX512F + AVX512BW)" OFF)
-
-add_library(nnue STATIC src/nnue/nnue.cpp)
+# The NNUE SIMD hot loops ship in THREE per-ISA translation units — AVX-512,
+# AVX2 and a scalar fallback — and the engine picks the fastest the running CPU
+# supports at startup via CPUID (see src/nnue/nnue_kernels.h). So a single
+# distributable runs on any x86-64 box yet still uses AVX-512 where present; no
+# separate per-ISA binaries. nnue.cpp and the scalar kernel stay at the global
+# portable floor; only the two SIMD kernel files are raised, and each kernel also
+# carries a target() attribute so the ISA survives LTO (the per-file -m flags
+# alone are not reliably preserved across the link-time recompile).
+add_library(nnue STATIC
+    src/nnue/nnue.cpp
+    src/nnue/nnue_kernels_avx512.cpp
+    src/nnue/nnue_kernels_avx2.cpp
+    src/nnue/nnue_kernels_scalar.cpp
+)
 target_include_directories(nnue PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(nnue PUBLIC bagatur)
+
+if (MSVC)
+    set_source_files_properties(src/nnue/nnue_kernels_avx512.cpp
+        PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+    set_source_files_properties(src/nnue/nnue_kernels_avx2.cpp
+        PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+else()
+    set_source_files_properties(src/nnue/nnue_kernels_avx512.cpp
+        PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx2;-mfma")
+    set_source_files_properties(src/nnue/nnue_kernels_avx2.cpp
+        PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+endif()
 
 # ------------------------------------------------------------------ embedded network
 # If network_bagatur.nnue is present in the project root, embed it directly
@@ -92,20 +134,6 @@ else()
     message(STATUS "NNUE: no network_bagatur.nnue in project root — engine will read it from CWD at startup")
 endif()
 
-if (BAGATUR_AVX512)
-    message(STATUS "NNUE: AVX-512 path enabled")
-    if (MSVC)
-        target_compile_options(nnue PRIVATE /arch:AVX512)
-    else()
-        target_compile_options(nnue PRIVATE -mavx512f -mavx512bw -mavx2 -mfma)
-    endif()
-else()
-    if (MSVC)
-        target_compile_options(nnue PRIVATE /arch:AVX2)
-    else()
-        target_compile_options(nnue PRIVATE -mavx2 -mfma)
-    endif()
-endif()
 
 # ------------------------------------------------------------------ binaries
 add_executable(perft     src/board/perft.cpp)
@@ -168,10 +196,12 @@ if (NOT MSVC)
     target_link_libraries(Bagatur.cpp-x64 PRIVATE pthread)
 endif()
 
-# Distributable filename carries version + ISA level + arch. The CMake TARGET
+# Distributable filename carries version + arch + ISA floor. The CMake TARGET
 # stays `Bagatur.cpp-x64` (so `--target Bagatur.cpp-x64` and the docs keep
-# working); only the produced file is renamed. The `-avx2` tag flags the ISA
-# floor — the build is `-march=haswell` (AVX2/FMA/BMI2), no AVX-512.
+# working); only the produced file is renamed. The `-avx2` tag is the MINIMUM
+# ISA the binary needs (the -march=haswell floor); at runtime it dispatches up
+# to AVX-512 automatically on capable CPUs (src/nnue/nnue_kernels.h), so this one
+# file is both portable and fast — there is no separate `-avx512` build.
 set_target_properties(Bagatur.cpp-x64 PROPERTIES
     OUTPUT_NAME "Bagatur.cpp_1.0-x86_64-avx2")
 

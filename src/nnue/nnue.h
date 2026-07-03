@@ -42,6 +42,10 @@
 
 namespace nnue {
 
+// Name of the SIMD kernel set the running CPU selected at startup
+// ("AVX-512" / "AVX2" / "scalar"). Exposed for the UCI startup banner.
+const char* active_simd_name();
+
 inline constexpr int HIDDEN_SIZE       = 1536;
 inline constexpr int FEATURE_SIZE      = 768;
 inline constexpr int OUTPUT_BUCKETS    = 8;
