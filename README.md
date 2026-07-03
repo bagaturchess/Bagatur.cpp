@@ -93,11 +93,11 @@ that runs everywhere yet still uses AVX-512 where the CPU has it:
   See [src/nnue](src/nnue/README.md#simd--runtime-cpu-dispatch).
 - The **static link** means the exe carries no MinGW runtime DLLs (`libstdc++-6`,
   `libgcc_s_seh-1`, `libwinpthread-1`); a target box needs only always-present
-  Windows system DLLs (`KERNEL32` and the UCRT `api-ms-win-crt-*`, built into
-  Windows 10+).
-- **LTO is on**, built with the winlibs GCC 16 UCRT toolchain, which handles
-  LTO + static linking soundly (the older GCC 8.1 did not). Toggle with
-  `-DBAGATUR_LTO=OFF`.
+  Windows system DLLs (`KERNEL32` + `msvcrt`), so it runs on **Windows 7 and up**.
+- **LTO is on**, built with the **winlibs GCC 12.4 (MSVCRT)** toolchain — a modern
+  GCC where LTO + static linking is sound (unlike GCC 8.1). GCC 16 was rejected: it
+  regresses this engine's hot loops ~20 % vs GCC 12.4 on the same machine. Toggle
+  LTO with `-DBAGATUR_LTO=OFF`.
 
 To tune the *general* code for this machine as well, add `-DBAGATUR_MARCH=native`
 (faster search / movegen, but the result is no longer portable — never distribute
