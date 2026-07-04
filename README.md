@@ -1,3 +1,5 @@
+![Bagatur.cpp](Bagatur.cpp.png)
+
 # Bagatur.cpp
 
 C++20 port of the [Bagatur chess engine](https://github.com/topce/Bagatur).
