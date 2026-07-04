@@ -100,7 +100,7 @@ mis-detects — set an environment variable before launching (`avx512`/`avx2` tr
 the caller; forcing an ISA the CPU lacks faults exactly like a native build):
 
 ```bash
-BAGATUR_SIMD=avx2 ./Bagatur.cpp_1.0-x86_64-avx2
+BAGATUR_SIMD=avx2 ./Bagatur.cpp_1.0-x86_64
 ```
 
 Measured on an AVX-512 host, the AVX-512 kernel runs ~15–20 % more NPS than AVX2

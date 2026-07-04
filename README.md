@@ -56,8 +56,8 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target Bagatur.cpp-x64
 ```
 
-The target is `Bagatur.cpp-x64`, but the produced file carries the version + ISA
-+ arch — `build/Bagatur.cpp_1.0-x86_64-avx2[.exe]` — and is the UCI engine to
+The target is `Bagatur.cpp-x64`, but the produced file carries the version +
+arch — `build/Bagatur.cpp_1.0-x86_64[.exe]` — and is the UCI engine to
 drop into any GUI. Omit `--target` to build every target. Pick a generator with
 `-G` if you like (e.g. `-G Ninja`); CMake otherwise auto-selects one (Make /
 MSBuild).

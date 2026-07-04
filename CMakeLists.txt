@@ -196,14 +196,14 @@ if (NOT MSVC)
     target_link_libraries(Bagatur.cpp-x64 PRIVATE pthread)
 endif()
 
-# Distributable filename carries version + arch + ISA floor. The CMake TARGET
-# stays `Bagatur.cpp-x64` (so `--target Bagatur.cpp-x64` and the docs keep
-# working); only the produced file is renamed. The `-avx2` tag is the MINIMUM
-# ISA the binary needs (the -march=haswell floor); at runtime it dispatches up
-# to AVX-512 automatically on capable CPUs (src/nnue/nnue_kernels.h), so this one
-# file is both portable and fast — there is no separate `-avx512` build.
+# Distributable filename carries version + arch only. No ISA tag: the binary
+# runtime-dispatches the NNUE kernels from AVX2 up to AVX-512 per CPU
+# (src/nnue/nnue_kernels.h), so a single file is both portable and fast — an
+# `-avx2`/`-avx512` suffix would misdescribe it. The CMake TARGET stays
+# `Bagatur.cpp-x64` (so `--target Bagatur.cpp-x64` and the docs keep working);
+# only the produced file is renamed.
 set_target_properties(Bagatur.cpp-x64 PROPERTIES
-    OUTPUT_NAME "Bagatur.cpp_1.0-x86_64-avx2")
+    OUTPUT_NAME "Bagatur.cpp_1.0-x86_64")
 
 if (BAGATUR_HAS_EMBEDDED_NETWORK)
     # Add the generated TU to the executable's own sources. Avoids the

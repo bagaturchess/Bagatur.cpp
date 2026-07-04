@@ -169,8 +169,9 @@ cmake --build build --target Bagatur.cpp-x64 --config Release
 ```
 
 The CMake target is `Bagatur.cpp-x64`, but the produced file carries the version
-+ ISA + arch: `build/Bagatur.cpp_1.0-x86_64-avx2.exe` (no `.exe` on POSIX) — the
-only artifact you need to ship.
++ arch: `build/Bagatur.cpp_1.0-x86_64.exe` (no `.exe` on POSIX) — the
+only artifact you need to ship. (No ISA suffix: the NNUE kernels dispatch from
+AVX2 up to AVX-512 at runtime, so one file serves every x86-64 CPU.)
 
 ## Smoke test
 
@@ -196,7 +197,7 @@ quit
 
 ```bash
 cutechess-cli \
-  -engine cmd=./Bagatur.cpp_1.0-x86_64-avx2 name=Bagatur.cpp \
+  -engine cmd=./Bagatur.cpp_1.0-x86_64 name=Bagatur.cpp \
   -engine cmd=./bagatur.jar      name=BagaturJava proto=uci \
   -each tc=40/60+0.6 \
   -games 100 -concurrency 4 \
