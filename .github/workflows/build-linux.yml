@@ -37,6 +37,20 @@ jobs:
           grep -q "readyok" out.txt
           grep -q "NNUE SIMD:" out.txt
 
+      - name: Search startpos to depth 30 (single-threaded — dumps NPS)
+        # Informational: streams every `info depth ... nps ...` line to the job
+        # console. The engine runs a fixed-depth `go` to completion before it
+        # reads the trailing `quit`, so a plain pipe drives it correctly. Never
+        # fails the job; capped so a slow deep search can't hang it.
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          printf 'uci\nsetoption name ThreadsCount value 1\nisready\nposition startpos\ngo depth 30\nquit\n' \
+            | ./build/Bagatur.cpp_1.0-x86_64 | tee search.log
+          echo "----- summary -----"
+          grep '^info depth' search.log | tail -1 || true
+          grep '^bestmove'   search.log | tail -1 || true
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
