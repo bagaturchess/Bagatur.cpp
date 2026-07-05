@@ -19,7 +19,11 @@ if (MSVC)
     add_compile_options(/arch:AVX2)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
-    add_compile_options(-O3 -fno-exceptions -fno-rtti)
+    add_compile_options(-O3)
+    # -fno-exceptions / -fno-rtti are C++-only; applying -fno-rtti to the Syzygy
+    # C file (tbprobe.c) warns. Scope them to C++ so C stays clean.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
+                        $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
     # ISA target for the general (non-NNUE) code. Default `haswell` (2013) /
     # AMD Excavator+ / Zen+ — AVX2 + FMA + BMI2 (pext for magic bitboards) +
     # POPCNT, but NO AVX-512 — the portable floor for the SHIPPED binary. GCC 8.1
@@ -161,6 +165,12 @@ target_include_directories(syzygy PUBLIC
     ${CMAKE_SOURCE_DIR}/src/syzygy   # tbprobe.h does `#include <tbconfig.h>`
 )
 target_link_libraries(syzygy PUBLIC bagatur)
+
+# tbprobe.c is vendored Fathom code — silence its one sign-compare warning here
+# instead of patching upstream. Scoped to the C source and GCC/Clang only.
+if (NOT MSVC)
+    target_compile_options(syzygy PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-sign-compare>)
+endif()
 
 # ------------------------------------------------------------------ search
 add_library(search STATIC
