@@ -1,0 +1,45 @@
+name: Build Linux
+
+# Manual only — start it from the Actions tab with the "Run workflow" button.
+on:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+          echo "----- toolchain -----"
+          g++ --version
+          cmake --version
+
+      - name: Configure (Release)
+        # The default ubuntu-latest GCC is in the good 12-14 range (NOT 16, which
+        # regresses this engine's hot loops). Using the default keeps gcc / gcc-ar
+        # / gcc-ranlib consistent for LTO. network_bagatur.nnue is in the repo, so
+        # it gets embedded and the binary is fully self-contained.
+        run: cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build engine
+        run: cmake --build build --target Bagatur.cpp-x64 -j"$(nproc)"
+
+      - name: Smoke test (UCI handshake + SIMD dispatch)
+        run: |
+          printf 'uci\nisready\nquit\n' | ./build/Bagatur.cpp_1.0-x86_64 | tee out.txt
+          grep -q "uciok"  out.txt
+          grep -q "readyok" out.txt
+          grep -q "NNUE SIMD:" out.txt
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bagatur.cpp-linux-x86_64
+          path: build/Bagatur.cpp_1.0-x86_64
+          if-no-files-found: error
