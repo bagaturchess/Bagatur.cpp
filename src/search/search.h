@@ -78,6 +78,7 @@ struct Result {
     int            seldepth   = 0;
     std::uint64_t  nodes      = 0;
     std::uint64_t  tbhits     = 0;   // Syzygy tablebase probe hits this search
+    int            hashfull   = 0;   // TT fill, permill (0-1000) for UCI info
     double         time_secs  = 0.0;
     std::array<int, MAX_PLY> pv{};
     int            pv_length  = 0;

@@ -41,6 +41,11 @@ public:
     void clear();
     void new_search() noexcept { ++gen_; }  // called between searches (no concurrent search)
 
+    // UCI `hashfull`: how full the table is, in permill (0-1000). A sampled
+    // estimate over the first 1000 slots — positions hash ~uniformly, so this
+    // is cheap and representative. Safe to call concurrently with the search.
+    int hashfull() const noexcept;
+
     // Probe: returns true if a matching, non-torn entry was found (sets `out`).
     // `score` is decoded as stored; the caller applies score_from_tt for ply.
     bool probe(board::BB key, TTEntry& out) const noexcept;

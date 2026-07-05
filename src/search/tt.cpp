@@ -91,6 +91,21 @@ bool TranspositionTable::probe(board::BB key, TTEntry& out) const noexcept {
     return false;
 }
 
+int TranspositionTable::hashfull() const noexcept {
+    // Sample the first 1000 slots and report the permill that are in use (a
+    // slot is used once it holds a real entry, i.e. flag != TT_NONE).
+    constexpr int kSamples = 1000;
+    int used = 0;
+    int seen = 0;
+    for (std::size_t bi = 0; bi < num_buckets_ && seen < kSamples; ++bi) {
+        for (const Slot& s : table_[bi].e) {
+            if (w0_flag(s.w0.load(RELAXED)) != TT_NONE) ++used;
+            if (++seen >= kSamples) break;
+        }
+    }
+    return seen ? used * 1000 / seen : 0;
+}
+
 void TranspositionTable::store(board::BB key, int move, int score, int eval,
                                int depth, TTFlag flag, int ply) noexcept {
     Bucket&    b   = table_[static_cast<std::size_t>(key) & mask_];

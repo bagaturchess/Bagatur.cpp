@@ -1328,6 +1328,7 @@ Result Searcher::goPVS(const Limits& lim) {
         best.time_secs= std::chrono::duration<double>(now - start_).count();
         best.nodes    = nodes_;
         best.tbhits   = tb_hits_;
+        best.hashfull = tt_->hashfull();
         best.seldepth = sel_depth_;
 
         if (lim.on_iteration) lim.on_iteration(best, lim.callback_user);
@@ -1510,6 +1511,7 @@ Result Searcher::goMTD(const Limits& lim) {
             best.time_secs  = now_secs;
             best.nodes      = nodes_;
             best.tbhits     = tb_hits_;
+            best.hashfull   = tt_->hashfull();
             best.seldepth   = sel_depth_;
 
             // Info line for the GUI reflects THIS probe's bound (so an

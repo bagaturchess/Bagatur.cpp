@@ -74,6 +74,7 @@ Result SMPSearcher::go(const Limits& lim) {
                        && (m.best_move != last.best_move || m.score != last.score));
         if (is_new) {
             m.time_secs = elapsed();
+            m.hashfull  = tt_->hashfull();
             if (lim.on_iteration) lim.on_iteration(m, lim.callback_user);
             last = m;
             have_last = true;
@@ -96,6 +97,7 @@ Result SMPSearcher::go(const Limits& lim) {
     Result final_r;
     if (merge_.merged(final_r)) {
         final_r.time_secs = elapsed();
+        final_r.hashfull  = tt_->hashfull();
         if (lim.on_iteration) lim.on_iteration(final_r, lim.callback_user);
         return final_r;
     }

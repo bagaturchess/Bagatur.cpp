@@ -98,11 +98,12 @@ void info_callback(const search::Result& r, void* user) {
     // two as distinct outputs — printing `score cp 29996` for a forced mate
     // leaves the GUI's mate-indicator dark and breaks live mate-distance
     // displays during tournament play.
-    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu tbhits %llu",
+    std::printf("info depth %d seldepth %d nodes %llu time %.0f nps %llu hashfull %d tbhits %llu",
                 r.depth, r.seldepth,
                 static_cast<unsigned long long>(r.nodes),
                 r.time_secs * 1000.0,
                 static_cast<unsigned long long>(r.nodes / std::max(r.time_secs, 1e-9)),
+                r.hashfull,
                 static_cast<unsigned long long>(r.tbhits));
     if (search::is_mate_score(r.score)) {
         // plies = MAX_MATE - |score| (mate scoring convention in this engine).
