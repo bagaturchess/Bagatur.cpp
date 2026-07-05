@@ -4,7 +4,7 @@
 
 C++20 port of the [Bagatur chess engine](https://github.com/topce/Bagatur).
 
-The project has two goals:
+The project has three goals:
 
 1. **Compare Java and C++ performance.** The C++ port runs at almost **2× the
    NPS** of the Java engine and is roughly **25 Elo stronger**.
@@ -13,6 +13,8 @@ The project has two goals:
    classic PVS, and a
    [consensus-based Lazy SMP](src/search/README.md#smp--lazy-smp) search in which
    the worker threads *vote* to decide the best move for a position.
+3. **Resolve the SMP scaling issue** of Bagatur on Java, described in
+   [`SMP.scaling.issue.txt`](https://github.com/bagaturchess/Bagatur/blob/master/Search/SMP.scaling.issue.txt).
 
 | Component                          | Mirrors Java                                            |
 | ---------------------------------- | ------------------------------------------------------- |
