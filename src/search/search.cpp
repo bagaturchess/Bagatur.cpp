@@ -605,7 +605,10 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
             //   r = max(1.5, depth/3 + 3 + min(3, max(0, static_eval-beta)/80)) * 1.555
             //   probe with `[beta-1, beta]` at ply+1
             //   if probe fails high, VERIFY at same ply, [beta-1, beta], depth-r
-            //   only cut when both pass — prevents NMP zugzwang artifacts
+            //   only cut when both pass — prevents NMP zugzwang artifacts.
+            //   (Plain-NMP tested 2026-07-10: −8.7 Elo — verification EARNS its
+            //    cost here; its bound is the node's own beta, NOT a γ-relative
+            //    tt_score, so it is NOT the MTD-fragile class. Kept verified.)
             if (depth >= 3) {
                 double r_raw   = depth / 3.0 + 3.0
                                + std::min(3.0, std::max(0, static_eval - beta) / 80.0);
@@ -668,13 +671,14 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
     // ----------------------------------------------------------------
     // Singular-move extension + multi-cut — Java Search_PVS_NWS.java
     // line 927-992. Test whether the TT move is uniquely good at this
-    // position. If yes, extend it. If a multi-cut is detected (≥2 moves
-    // beat β at reduced depth), cut immediately.
+    // position. The singular EXTENSION is deliberately disabled (see the
+    // +14.6 Elo note at the branch below); the multi-cut half and the
+    // singular probe stay live.
     //
     // `tt_move_extension` semantics (Java line 1276):
-    //    +2  → double extension (alternatives much weaker than TT move)
-    //    +1  → single extension (TT move is singular)
-    //     0  → no extension (SME not triggered)
+    //    +2  → double extension  (DISABLED — see note below)
+    //    +1  → single extension  (DISABLED — see note below)
+    //     0  → no extension (SME not triggered / extension disabled)
     //    -2  → multi-cut hint: TT move not singular, search it shallower
     // ----------------------------------------------------------------
     int tt_move_extension = 0;
@@ -704,12 +708,19 @@ int Searcher::search(int ply, int depth, int alpha, int beta,
         if (aborted_) return alpha;
 
         if (singular_value < singular_beta) {
-            // TT move is singular — extend
-            if (singular_value < singular_beta - singular_margin) {
+            // TT move is singular — extension DELIBERATELY DISABLED.
+            // SPRT 2026-07-10: disabling it scored +14.6 Elo (LOS 97.6%,
+            // 247-205-548 @ 1000g). Reason: `singular_beta = tt_score - margin`
+            // derives the verification bound from a γ-relative tt_score, so
+            // under the MTD(f) root the singular verdict is noisy across
+            // γ-probes and extensions fire on the wrong lines (seldepth 33→23,
+            // nodes −64% when removed). Same MTD-fragility class as ProbCut /
+            // multi-cut. DO NOT re-enable without re-running the match on MTD(f).
+            /*if (singular_value < singular_beta - singular_margin) {
                 tt_move_extension = 2;   // double extension
             } else {
                 tt_move_extension = 1;
-            }
+            }*/
         } else if (!is_pv) {
             // Multi-cut: an alternative also beats β
             if (singular_value > beta
