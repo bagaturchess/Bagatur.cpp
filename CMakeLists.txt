@@ -152,6 +152,11 @@ target_link_libraries(perft_eval PRIVATE nnue)
 add_executable(benchmark_eval src/nnue/benchmark_eval.cpp)
 target_link_libraries(benchmark_eval PRIVATE nnue)
 
+# Static-eval probe: prints NNUE evals for a FEN set (mirrors nnue_v3.NNUE.main)
+# so the C++ port can be diffed against the Java reference after a net swap.
+add_executable(eval_probe src/nnue/eval_probe.cpp)
+target_link_libraries(eval_probe PRIVATE nnue)
+
 # ------------------------------------------------------------------ syzygy (Fathom)
 # Self-contained Syzygy tablebase prober. tbprobe.c #includes tbchess.c, so it is
 # the only C translation unit; syzygy.cpp is the C++ wrapper that the search and
@@ -221,7 +226,10 @@ if (BAGATUR_HAS_EMBEDDED_NETWORK)
     # before nnue.cpp's reference is observed. LTO is disabled for this TU —
     # a 16 MB constant array has nothing to optimize and slows the link.
     target_sources(Bagatur.cpp-x64 PRIVATE "${BAGATUR_NETWORK_CPP}")
+    # OBJECT_DEPENDS: the .incbin TU text does not change when the net file
+    # changes, so make it depend on the net so a swap re-assembles the object.
     set_source_files_properties("${BAGATUR_NETWORK_CPP}"
-        PROPERTIES COMPILE_FLAGS "-fno-lto" SKIP_LINTING ON)
+        PROPERTIES COMPILE_FLAGS "-fno-lto" SKIP_LINTING ON
+                   OBJECT_DEPENDS "${BAGATUR_NETWORK_FILE}")
     target_compile_definitions(Bagatur.cpp-x64 PRIVATE BAGATUR_EMBEDDED_NETWORK=1)
 endif()
