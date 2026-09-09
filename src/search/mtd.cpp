@@ -150,19 +150,45 @@ bool MTDSearchManager::isLast() const {
     int lb = betas_gen_.getLowerBound();
     int ub = betas_gen_.getUpperBound();
 
-    bool last = (lb + TRUST_WINDOW_BEST_MOVE >= ub);
+    // SCORE_MIN / SCORE_MAX are "no bound established yet" sentinels, and they
+    // sit just OUTSIDE the mate band (SCORE_MIN == -MAX_MATE - 1). So any
+    // width test taken against a sentinel looks converged the moment the
+    // opposite bound happens to be a mate score:
+    //
+    //   root is mated in 2  →  one fail-low probe sets ub = mated_in(3) = -29997
+    //   lb is still SCORE_MIN = -30001
+    //   lb + TRUST_WINDOW_BEST_MOVE = -29993 >= -29997   →  "converged"
+    //
+    // The depth then finishes having produced nothing but a fail-low. MTD only
+    // commits best_move/PV on a fail-high (see goMTD), so the iteration yields
+    // no move at all: the driver spun through all 127 depths in ~30 ms, every
+    // `info` line an `upperbound` with no `pv`, and the SMP merge — which
+    // discards upperbound iterations — got nothing and shipped `bestmove 0000`.
+    //
+    // A sentinel is not a bound. Only test widths between established bounds.
+    const bool lb_known = (lb != SCORE_MIN);
+    const bool ub_known = (ub != SCORE_MAX);
 
-    if (!last) {
+    if (lb_known && ub_known) {
+        if (lb + TRUST_WINDOW_BEST_MOVE >= ub) return true;
+
         // Mate-score early-exit: once we've found a mate value within the
         // current window, no need to keep narrowing.
-        if (lb >= MATE_THRESHOLD && is_mate_score(lb) && (ub - lb < MATE_THRESHOLD)) {
-            last = true;
+        if (ub - lb < MATE_THRESHOLD) {
+            if (lb >=  MATE_THRESHOLD && is_mate_score(lb)) return true;
+            if (ub <= -MATE_THRESHOLD && is_mate_score(ub)) return true;
         }
-        if (ub <= -MATE_THRESHOLD && is_mate_score(ub) && (ub - lb < MATE_THRESHOLD)) {
-            last = true;
-        }
+        return false;
     }
-    return last;
+
+    // Lower bound only: a proven mate FOR US arrived on a fail-high, so the
+    // iteration already carries a PV and there is nothing left to narrow.
+    if (lb_known && lb >= MATE_THRESHOLD && is_mate_score(lb)) return true;
+
+    // Upper bound only (or neither): never converge. A depth that has produced
+    // nothing but fail-lows has no best move to report, and the next γ-step
+    // walks β down past the true score — which is what finally fails high.
+    return false;
 }
 
 void MTDSearchManager::finishDepth() {

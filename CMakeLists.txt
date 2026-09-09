@@ -152,11 +152,6 @@ target_link_libraries(perft_eval PRIVATE nnue)
 add_executable(benchmark_eval src/nnue/benchmark_eval.cpp)
 target_link_libraries(benchmark_eval PRIVATE nnue)
 
-# Static-eval probe: prints NNUE evals for a FEN set (mirrors nnue_v3.NNUE.main)
-# so the C++ port can be diffed against the Java reference after a net swap.
-add_executable(eval_probe src/nnue/eval_probe.cpp)
-target_link_libraries(eval_probe PRIVATE nnue)
-
 # ------------------------------------------------------------------ syzygy (Fathom)
 # Self-contained Syzygy tablebase prober. tbprobe.c #includes tbchess.c, so it is
 # the only C translation unit; syzygy.cpp is the C++ wrapper that the search and

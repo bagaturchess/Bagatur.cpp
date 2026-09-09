@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <thread>
+#include <vector>
 
 namespace search::smp {
 
@@ -51,14 +52,23 @@ Result SMPSearcher::go(const Limits& lim) {
 
     // Launch the workers. Each gets the same time budget (self-timing) but its
     // info goes to the merge, not the GUI.
+    //
+    // Each worker's own final Result is kept as a last-resort fallback: the
+    // merge only accepts lowerbound iterations that carry a PV, so a search
+    // that produces none (instant stop, or a root whose every probe fails low)
+    // would otherwise leave `go()` returning a zero-initialised Result and the
+    // UCI layer shipping `bestmove 0000`. A worker's own Result always carries
+    // the first move it committed. Each thread writes only its own slot and
+    // every thread is joined before the vector is read.
+    std::vector<Result> worker_results(num_threads_);
     std::vector<std::thread> threads;
     threads.reserve(num_threads_);
     for (int i = 0; i < num_threads_; ++i) {
-        threads.emplace_back([this, i, lim]() {
+        threads.emplace_back([this, i, lim, &worker_results]() {
             Limits wl        = lim;
             wl.on_iteration  = &SMPSearcher::worker_cb;
             wl.callback_user = &ctx_[i];
-            workers_[i]->go(wl);
+            worker_results[i] = workers_[i]->go(wl);
             running_.fetch_sub(1, std::memory_order_relaxed);
         });
     }
@@ -101,7 +111,26 @@ Result SMPSearcher::go(const Limits& lim) {
         if (lim.on_iteration) lim.on_iteration(final_r, lim.callback_user);
         return final_r;
     }
-    return last_sent;   // fallback (e.g. instant stop before any iteration merged)
+
+    if (have_last && last_sent.best_move != 0) return last_sent;
+
+    // Nothing ever merged. Fall back to the deepest worker Result that actually
+    // holds a move, so a legal move is reported whenever one exists. Only a
+    // genuine mate/stalemate root (no legal move at all) still yields 0.
+    const Result* fallback = nullptr;
+    for (const Result& r : worker_results) {
+        if (r.best_move == 0) continue;
+        if (fallback == nullptr || r.depth > fallback->depth) fallback = &r;
+    }
+    if (fallback != nullptr) {
+        Result r     = *fallback;
+        r.time_secs  = elapsed();
+        r.hashfull   = tt_->hashfull();
+        if (lim.on_iteration) lim.on_iteration(r, lim.callback_user);
+        return r;
+    }
+
+    return last_sent;   // no legal move at the root (checkmate / stalemate)
 }
 
 }  // namespace search::smp

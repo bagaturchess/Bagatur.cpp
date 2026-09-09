@@ -1422,6 +1422,29 @@ Result Searcher::goMTD(const Limits& lim) {
     best.score = initial_val;
     best.depth = 0;
 
+    // A root with no legal move (checkmate / stalemate) has nothing to search
+    // and no move to report — settle it here instead of entering the driver.
+    // The loop below assumes every depth can eventually commit a move, which
+    // holds only while a legal move exists: β is clamped to the band a root
+    // WITH a move can reach, so a mated root (score `mated_in(1)`, below the
+    // band) fails low on every probe, `decreaseUpper` stops moving the bound
+    // after the first one, and no bound ever converges. That is an unbounded
+    // spin under `go depth N`, which has no clock to stop it.
+    {
+        gen_.startPly();
+        gen_.generateMoves(*cb_);
+        gen_.generateAttacks(*cb_);
+        bool any_legal = false;
+        while (gen_.hasNext()) {
+            if (cb_->isLegal(gen_.next())) { any_legal = true; break; }
+        }
+        gen_.endPly();
+        if (!any_legal) {
+            best.score = (cb_->checkingPieces != 0) ? mated_in(1) : SCORE_DRAW;
+            return best;
+        }
+    }
+
     while (!stop_.load(std::memory_order_relaxed) &&
            mgr.getCurrentDepth() <= mgr.getMaxIterations()) {
 
@@ -1441,9 +1464,20 @@ Result Searcher::goMTD(const Limits& lim) {
         // to empty, so search() returns immediately — no PV is built, the
         // MTD bounds never tighten, and the iteration silently spins.
         //
-        // Safe band: `mated_in(1) + 1 ≤ β ≤ mate_in(2)`.
-        if (beta <= mated_in(1)) beta = mated_in(1) + 1;
-        if (beta >  mate_in(2))  beta = mate_in(2);
+        // Safe band: the extremes the root score can actually take. With at
+        // least one legal move the root plays into ply 2, whose own mate
+        // pruning clamps the child to `[mated_in(2), mate_in(3)]`, so the root
+        // score lies in `[mated_in(3), mate_in(2)]` — note the asymmetry, it
+        // comes straight from `mate_alpha`/`mate_beta` using ply vs ply+1.
+        //
+        // Clamping β to those exact extremes keeps the post-prune root window
+        // non-empty AND lets the deepest probe return the true score instead of
+        // a bound: the old `mated_in(1) + 1` floor sat one ply BELOW the lowest
+        // reachable score, so the fail-high that proves a forced loss collapsed
+        // the ply-2 window and came back as `mated_in(2)` — the engine reported
+        // `mate -1` on a position it is mated in 2.
+        if (beta < mated_in(3)) beta = mated_in(3);
+        if (beta > mate_in(2))  beta = mate_in(2);
 
         // Reset the root PV stack so we can grab a fresh PV after the search.
         stacks_[1].pv_length = 0;
@@ -1574,7 +1608,16 @@ Result Searcher::goMTD(const Limits& lim) {
         // proven mate after convergence and stop chasing depth on a forced mate.
         if (depth_converged && best.best_move != 0 && is_mate_score(best.score)) break;
         if (is_mate_score(mgr.getLowerBound()) && mgr.getLowerBound() > 0) break;
-        if (is_mate_score(mgr.getUpperBound()) && mgr.getUpperBound() < 0) break;
+        // Mate AGAINST us, proved as an upper bound only. A negative mate upper
+        // bound always comes from a fail-low, and MTD commits no move/PV on a
+        // fail-low — so breaking the moment the bound appears strands the depth
+        // with nothing published (and hands the SMP merge, which drops
+        // upperbound iterations, nothing at all). `best.lower_bound` is set
+        // exactly on a fail-high commit, so it means "some iteration has already
+        // published a move". Without one, keep probing: β γ-steps down past the
+        // score and that fail-high is what commits the move.
+        if (is_mate_score(mgr.getUpperBound()) && mgr.getUpperBound() < 0
+            && best.lower_bound) break;
     }
     return best;
 }
